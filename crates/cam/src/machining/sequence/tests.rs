@@ -49,7 +49,7 @@ fn drilling_pecks_retract_and_conical_tip_does_not_invent_full_depth() {
     s.operations.push(op("drill", K::Drill, Some(Cutting::Drill(d.clone()))));
     let path = calculate(&s).unwrap();
     assert_eq!(path.moves.iter().filter(|m| m.motion == Motion::Feed).count(), 14);
-    for pair in path.moves.chunks_exact(2) {
+    for pair in path.moves.as_chunks::<2>().0 {
         assert_eq!(pair[0].phase, Phase::Drill);
         assert_eq!(pair[1].to.z_mm, 4.);
         assert_eq!(pair[1].to.diameter_mm, 0.);
