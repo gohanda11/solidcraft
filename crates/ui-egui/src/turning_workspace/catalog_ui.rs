@@ -243,7 +243,7 @@ fn imported(app: &SolveApp) -> Option<&cam::holder_cad::HolderCad> {
     cad.filter(|c| c.model == model).or_else(|| cam::holder_cad::find(&plan.tool_cad_library, holder, model))
 }
 pub(super) fn preview(app: &SolveApp) -> Option<(bool, &str)> {
-    (super::active(app) && app.turning_workspace.workflow == 4)
+    (super::active(app) && (app.turning_workspace.workflow == 4 || app.turning_workspace.tool_editor.is_some()))
         .then_some(app.turning_workspace.catalog.preview.as_ref())
         .flatten()
         .map(|(h, m)| (*h, m.as_str()))

@@ -1,5 +1,14 @@
 use super::*;
 
+#[test]
+fn split_section_keeps_backtracking_edges_distinct_from_the_model() {
+    use machining::ProfilePoint;
+    let points = [(0., 40.), (-10., 40.), (-10., 50.), (-10., 40.), (-20., 40.)].map(|(z_mm, diameter_mm)| ProfilePoint { z_mm, diameter_mm });
+    assert_eq!(drawing::simplified(&points), points);
+    let straight = [(0., 40.), (-10., 40.), (-20., 40.)].map(|(z_mm, diameter_mm)| ProfilePoint { z_mm, diameter_mm });
+    assert_eq!(drawing::simplified(&straight), [straight[0], straight[2]]);
+}
+
 fn manual_plan() -> TurningPlan {
     let mut plan = TurningPlan::nl2500();
     let setup = &mut plan.setups[0];

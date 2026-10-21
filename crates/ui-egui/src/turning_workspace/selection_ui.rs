@@ -61,32 +61,33 @@ fn number(ui: &mut egui::Ui, id: &str, label: &str, n: &mut f64, max: f64) {
 }
 pub(super) fn tools(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut State) {
     ui.heading("工具から加工を作る");
-    ui.small(format!("{} · {}", plan.machine, plan.material));
-    if plan.setups.len() > 1 {
-        controls::dropdown(ui, "cam_setup_choice", (plan.setups.get(state.setup).map_or("段取り", |s| s.name.as_str())).to_string(), |ui| {
-            for (i, s) in plan.setups.iter().enumerate() {
-                if controls::value(ui, &mut state.setup, i, &s.name).changed() {
-                    state.selection = View::default();
-                }
-            }
-        });
-    }
     ui.separator();
     ui.small("工具 → 輪郭の始点・終点 → 経路確認 → 追加");
     let Some(setup) = plan.setups.get(state.setup) else { return };
     for slot in &setup.turret {
         let role = ROLES.iter().find(|(r, _)| *r == slot.role).map_or("", |(_, k)| tr(k));
         let label = format!("T{:02}  {}", slot.station, role);
-        let r = ui
-            .add_enabled_ui(slot.role != ToolRole::Vacant, |ui| {
-                controls::pick(ui, state.selection.station == Some(slot.station) && state.selection.editing, label)
-            })
-            .inner;
+        let selected = state.tool_editor == Some(slot.station) || (state.selection.station == Some(slot.station) && state.selection.editing);
+        let r = controls::pick(ui, selected, label);
         crate::scenario::publish_rect(&format!("cam_tool_{}", slot.station), r.rect);
-        if slot.role != ToolRole::Vacant {
-            crate::scenario::publish_handle(&format!("cam_tool_{}", slot.station), r.rect.center());
+        crate::scenario::publish_handle(&format!("cam_tool_{}", slot.station), r.rect.center());
+        let frame = ui.ctx().cumulative_frame_nr();
+        if !r.clicked() || state.tool_click_frame == Some(frame) {
+            continue;
         }
-        if r.clicked() {
+        state.tool_click_frame = Some(frame);
+        if r.double_clicked() || r.triple_clicked() {
+            if state.simulation.selected_station != slot.station {
+                state.catalog.open = false;
+                if state.catalog.preview.take().is_some() {
+                    state.catalog.fit = true;
+                }
+            }
+            state.tool_editor = Some(slot.station);
+            state.simulation.selected_station = slot.station;
+            state.selection.editing = false;
+            state.selection.picking = false;
+        } else if r.clicked() && slot.role != ToolRole::Vacant {
             state.selection = View { station: Some(slot.station), editing: true, picking: true, ..View::default() };
             guided::go(state, 2);
             state.model_profile.inner = matches!(slot.role, ToolRole::IdRough | ToolRole::IdFinish);
@@ -110,7 +111,8 @@ pub(super) fn tools(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut State
             if !matches!(slot.role, ToolRole::OdRough | ToolRole::OdFinish | ToolRole::IdRough | ToolRole::IdFinish) {
                 state.selection.picking = false;
             }
-            state.selection.action = Some("difference");
+            // Keep selection cheap: synchronous residual calculation can delay the second click.
+            // Difference/preview buttons perform the calculation explicitly.
         }
     }
     ui.separator();
@@ -126,9 +128,10 @@ pub(super) fn tools(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut State
         state.selection.editing = false;
         state.selection.picking = false;
     }
-    ui.small("外径・内径：輪郭点から範囲指定\n穴・溝・端面：右側の寸法設定");
+    ui.small("ダブルクリック：工具を編集\n外径・内径：輪郭点から範囲指定\n穴・溝・端面：右側の寸法設定");
 }
 pub(super) fn operations(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut State) {
+    let review = state.workflow == 4;
     ui.heading("加工工程");
     let Some(setup) = plan.setups.get(state.setup) else { return };
     egui::ScrollArea::vertical().id_salt("cam_right_operations").max_height(205.).show(ui, |ui| {
@@ -145,6 +148,17 @@ pub(super) fn operations(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut 
                 .inner;
             crate::scenario::publish_rect(&format!("cam_operation_{i}"), r.rect);
             if r.clicked() {
+                if review {
+                    state.operation = i;
+                    state.spatial.playing = false;
+                    state.simulation.focus_contact = None;
+                    if let Some((_, _, path)) = &state.machining.preview
+                        && let Some(span) = path.operation_spans.iter().find(|span| span.operation_id == op.id)
+                    {
+                        state.machining.step = span.start;
+                    }
+                    continue;
+                }
                 guided::go(state, 2);
                 state.operation = i;
                 state.section = 2;
@@ -160,7 +174,7 @@ pub(super) fn operations(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut 
             ui.small("左の工具を選んで、最初の工程を作成します。");
         }
     });
-    if button(ui, "cam_add_operation", "穴・溝・端面などを追加", true) {
+    if !review && button(ui, "cam_add_operation", "穴・溝・端面などを追加", true) {
         state.selection.editing = false;
         state.selection.picking = false;
         operations_ui::open(plan, state);

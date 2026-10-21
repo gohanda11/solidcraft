@@ -195,6 +195,29 @@ pub fn active(app: &SolveApp) -> bool {
     state.machining.show && state.machining.preview.as_ref().is_some_and(|(_, id, _)| selected.is_some_and(|s| &s.id == id))
 }
 
+pub(super) fn nc_panel(ui: &mut egui::Ui, view: &View, revision: u64, setup: &str) {
+    let Some(nc) = &view.nc else {
+        ui.label("工程を決めて、NCを表示してください。");
+        return;
+    };
+    if nc.revision != revision || nc.setup != setup {
+        ui.colored_label(Tokens::get().warning, tr("cam.path_stale"));
+        return;
+    }
+    if ui_kit::button(ui, tr("cam.path_nc_copy"), ui_kit::Button::Small).clicked() {
+        ui.ctx().copy_text(nc.text.clone());
+    }
+    ui.small(tr("cam.path_review_only"));
+    let height = ui.text_style_height(&egui::TextStyle::Monospace);
+    egui::ScrollArea::both().id_salt("cam_review_nc").show_rows(ui, height, nc.lines.len(), |ui, rows| {
+        for i in rows {
+            if let Some(line) = nc.lines.get(i) {
+                ui.add(egui::Label::new(egui::RichText::new(line).monospace()).wrap_mode(egui::TextWrapMode::Extend));
+            }
+        }
+    });
+}
+
 pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     egui::Frame::new().fill(Tokens::get().panel).inner_margin(12.0).show(ui, |ui| {
         ui.set_min_size(ui.available_size());

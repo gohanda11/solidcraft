@@ -14,6 +14,7 @@ struct Preview {
 enum Action {
     Read,
     Apply(String),
+    Section(String),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -24,6 +25,64 @@ pub(super) struct View {
     preview: Option<Preview>,
     action: Option<Action>,
     error: Option<String>,
+    attempted: Option<(String, String)>,
+    pub(super) suppress_auto: bool,
+}
+
+pub(super) fn section_settings(ui: &mut egui::Ui, view: &mut View, bodies: &[String], setup: &Setup) {
+    ui.heading("モデル・加工方向");
+    ui.label("中心軸を水平に揃え、最初に削る側を右に表示します。");
+    if view.body.is_empty() {
+        view.body = setup
+            .od_job
+            .as_ref()
+            .and_then(|j| j.model_source.as_ref())
+            .map(|s| s.body.clone())
+            .or_else(|| (bodies.len() == 1).then(|| bodies.first().cloned()).flatten())
+            .unwrap_or_default();
+        view.reverse = setup.od_job.as_ref().and_then(|j| j.model_source.as_ref()).is_some_and(|s| s.reverse);
+    }
+    if let Some(source) = setup.od_job.as_ref().and_then(|j| j.model_source.as_ref())
+        && source.body == view.body
+    {
+        // Undo/redo may have restored a different direction without changing the selected body.
+        view.reverse = source.reverse;
+    }
+    let before = view.body.clone();
+    controls::dropdown(ui, "cam_source_body", if view.body.is_empty() { "モデルを選択".into() } else { view.body.clone() }, |ui| {
+        for body in bodies {
+            controls::value(ui, &mut view.body, body.clone(), body);
+        }
+    });
+    let key = (setup.id.clone(), view.body.clone());
+    if bodies.contains(&view.body)
+        && (before != view.body || (!view.suppress_auto && setup.od_job.is_none() && view.attempted.as_ref() != Some(&key)))
+    {
+        view.attempted = Some(key);
+        view.action = Some(Action::Section(setup.id.clone()));
+    }
+    if button(ui, "cam_model_read", "外径・内径・端面を再抽出", bodies.contains(&view.body)) {
+        view.action = Some(Action::Section(setup.id.clone()));
+    }
+    if button(ui, "cam_model_reverse", "加工方向を反転", bodies.contains(&view.body)) {
+        view.reverse = !view.reverse;
+        view.action = Some(Action::Section(setup.id.clone()));
+    }
+    ui.separator();
+    ui.strong("線をダブルクリックして編集");
+    ui.label("公差・ねじ指定・線の分割を設定できます。");
+    if let Some(source) = setup.od_job.as_ref().and_then(|j| j.model_source.as_ref()) {
+        ui.small(format!("中心軸 ({:.3}, {:.3}, {:.3})", source.axis[0], source.axis[1], source.axis[2]));
+        if source.approximation_mm > 0. {
+            ui.small(format!("円弧の折線近似 ≤ {:.3} mm", source.approximation_mm));
+        }
+    }
+    if setup.drawing.as_ref().is_some_and(|d| d.inner.iter().any(|p| p.diameter_mm == 0.) && d.inner.iter().any(|p| p.diameter_mm > 0.)) {
+        ui.colored_label(Tokens::get().warning, "止まり穴は輪郭表示のみ。内径経路は貫通穴に対応しています。");
+    }
+    if let Some(error) = &view.error {
+        ui.colored_label(Tokens::get().warning, error);
+    }
 }
 
 fn button(ui: &mut egui::Ui, id: &str, key: &str, enabled: bool) -> bool {
@@ -135,6 +194,21 @@ pub(super) fn chart(ui: &mut egui::Ui, profile: &[ProfilePoint]) {
 
 pub(super) fn process(app: &mut SolveApp, view: &mut View) {
     match view.action.take() {
+        Some(Action::Section(setup)) => {
+            view.error = app.run("cam.turning.profile.apply", json!({"body":view.body,"reverse":view.reverse,"setup":setup,"expected_revision":app.session.revision,"all":true,"create_operations":false})).err();
+            if view.error.is_some() {
+                view.reverse = app
+                    .session
+                    .doc
+                    .turning
+                    .as_ref()
+                    .and_then(|p| p.setups.iter().find(|s| s.id == setup))
+                    .and_then(|s| s.od_job.as_ref())
+                    .and_then(|j| j.model_source.as_ref())
+                    .is_some_and(|s| s.reverse);
+            }
+            view.preview = None;
+        }
         Some(Action::Read) => {
             view.preview = None;
             match app

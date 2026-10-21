@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 pub mod catalog;
+pub mod drawing;
 pub mod holder_cad;
 pub mod insert;
 pub mod machining;
@@ -36,6 +37,10 @@ pub struct TurningPlan {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Setup {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drawing: Option<drawing::Drawing>,
+    #[serde(default)]
+    pub ending: drawing::Ending,
     /// Optional machine dialect; absent in older plans, which keep their review fragment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post: Option<post::NlPost>,
@@ -210,6 +215,8 @@ impl TurningPlan {
             machine: "NL2500".into(),
             material: String::new(),
             setups: vec![Setup {
+                drawing: None,
+                ending: drawing::Ending::default(),
                 post: Some(post::NlPost::default()),
                 id: "setup-1".into(),
                 name: "Setup 1".into(),
@@ -249,6 +256,9 @@ impl TurningPlan {
             return invalid("total tool CAD display mesh budget exceeded");
         }
         for setup in &self.setups {
+            if let Some(drawing) = &setup.drawing {
+                drawing.validate()?;
+            }
             if let Some(post) = &setup.post {
                 post.validate()?;
             }
