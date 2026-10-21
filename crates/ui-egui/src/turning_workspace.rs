@@ -12,6 +12,7 @@ mod guided;
 pub mod machining_ui;
 mod model_profile;
 mod operations_ui;
+mod post_ui;
 mod selection_ui;
 mod simulation_ui;
 pub mod spatial;
@@ -167,6 +168,7 @@ fn add_operation(plan: &mut TurningPlan, state: &mut State) {
     let Some(setup) = plan.setups.get_mut(state.setup) else { return };
     let station = state.kind.suggested_station().filter(|n| setup.turret.iter().any(|s| s.station == *n && s.role != ToolRole::Vacant));
     let operation = Operation {
+        spindle: None,
         cutting: None,
         id,
         name: tr(kind_label(state.kind)).into(),
@@ -209,6 +211,7 @@ fn outline(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut State) {
         let id = next_id(plan, "setup");
         let previous = plan.setups.last();
         plan.setups.push(Setup {
+            post: previous.and_then(|s| s.post.clone()).or_else(|| Some(cam::post::NlPost::default())),
             name: format!("{} {}", tr("cam.setup"), plan.setups.len() + 1),
             id,
             previous_setup: previous.map(|s| s.id.clone()),

@@ -490,6 +490,7 @@ mod tests {
             [OperationKind::FaceRough, OperationKind::OdRough, OperationKind::FaceFinish, OperationKind::OdFinish].into_iter().enumerate()
         {
             setup.operations.push(Operation {
+                spindle: None,
                 cutting: None,
                 id: format!("op-{i}"),
                 name: "test".into(),

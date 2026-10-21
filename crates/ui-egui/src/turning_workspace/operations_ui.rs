@@ -281,6 +281,7 @@ pub(super) fn composer(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut St
             setup.operations.insert(
                 at,
                 Operation {
+                    spindle: None,
                     cutting: default_cutting(kind),
                     id,
                     name: draft.name.trim().into(),

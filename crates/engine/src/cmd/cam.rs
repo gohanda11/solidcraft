@@ -39,7 +39,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.turning.toolpath", "Calculate Turning Toolpath", toolpath).icon("inspect").doc_only().noundo()
         .params("setup: setup id. Calculates configured face/OD/ID profiles, axial drilling and rectangular OD groove rough/finish in operation order. All roughing and drilling precede finishing. ID needs an existing bore or an earlier drill reaching the full profile depth. Nominal cutting references; no automatic nose compensation."),
     CommandSpec::new("cam.turning.nc", "Export Turning Review NC", nc).icon("export").doc_only().noundo()
-        .params("setup: id, expected_revision: current session revision, path?: .nc file, overwrite?: false. Regenerates and exports a DISARMED review fragment, never machine-ready. Rejects stale review and unsupported operations."),
+        .params("setup: id, expected_revision: current session revision, path?: .nc file, overwrite?: false. Regenerates DISARMED review NC using setup.post (NL conversational-reference dialect) or the legacy fragment. Never machine-ready. Rejects stale review and unsupported operations."),
     CommandSpec::new("cam.turning.defaults", "Turning Plan Template", defaults).icon("settings")
         .doc_only()
         .noundo()
@@ -383,7 +383,15 @@ fn apply_profile(s: &mut Session, p: &Value) -> Result<Value> {
                     .map(|n| format!("{}-id-{n}", setup.id))
                     .find(|id| !setup.operations.iter().any(|o| &o.id == id))
                     .ok_or_else(|| bad(cmd, "operation id limit"))?;
-                let op = Operation { cutting: None, id, name: name.into(), kind, station: kind.suggested_station(), manual_separation: None };
+                let op = Operation {
+                    spindle: None,
+                    cutting: None,
+                    id,
+                    name: name.into(),
+                    kind,
+                    station: kind.suggested_station(),
+                    manual_separation: None,
+                };
                 let index = if kind == OperationKind::IdRough {
                     setup
                         .operations
@@ -467,7 +475,14 @@ fn nc(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad("cam.turning.nc", "design changed since preview; recalculate before exporting"));
     }
     let path = calculate(s, &req.setup)?;
-    let text = solidcraft_doc::cam::machining::review_nc(&path).map_err(|e| bad("cam.turning.nc", e.to_string()))?;
+    let setup =
+        s.doc.turning.as_ref().and_then(|p| p.setups.iter().find(|t| t.id == req.setup)).ok_or_else(|| bad("cam.turning.nc", "setup not found"))?;
+    let text = if let Some(post) = &setup.post {
+        solidcraft_doc::cam::post::review_nc(setup, post)
+    } else {
+        solidcraft_doc::cam::machining::review_nc(&path)
+    }
+    .map_err(|e| bad("cam.turning.nc", e.to_string()))?;
     if let Some(destination) = &req.path {
         if destination.len() > 4096 || destination.chars().any(char::is_control) || !destination.to_ascii_lowercase().ends_with(".nc") {
             return Err(bad("cam.turning.nc", "a bounded .nc destination is required"));
@@ -492,7 +507,7 @@ fn nc(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     Ok(
-        json!({"text":text,"path":req.path,"machine_ready":false,"disarmed":true,"revision":s.revision,"scope":"configured_face_od_id_drilling_od_grooves"}),
+        json!({"text":text,"path":req.path,"machine_ready":false,"disarmed":true,"revision":s.revision,"dialect":if setup.post.is_some(){"mori_nl_conversational_reference"}else{"legacy_review"},"scope":"configured_face_od_id_drilling_od_grooves"}),
     )
 }
 
@@ -543,6 +558,31 @@ fn set(s: &mut Session, params: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nl_reference_output_uses_saved_settings_and_invalidates_stale_review() {
+        use solidcraft_doc::cam::post::{NlPost, XSide};
+        let mut s = path_example();
+        let mut plan = s.doc.turning.as_deref().unwrap().clone();
+        plan.setups[0].post = Some(NlPost::default());
+        s.execute("cam.turning.set", &json!({"plan":plan})).unwrap();
+        let revision = s.revision;
+        let result = s.execute("cam.turning.nc", &json!({"setup":"setup-1","expected_revision":revision})).unwrap();
+        let text = result["text"].as_str().unwrap();
+        assert!(text.contains("G99G18\nG50S2000\nG54\nG0T1212"));
+        assert!(text.contains("G0X-") && text.contains("G96S150.000M3"));
+        assert_eq!(result["dialect"], "mori_nl_conversational_reference");
+        assert_eq!(result["machine_ready"], false);
+        assert_eq!(s.revision, revision, "export remains read-only");
+        let mut plan = s.doc.turning.as_deref().unwrap().clone();
+        plan.setups[0].post.as_mut().unwrap().x_side = XSide::Positive;
+        s.execute("cam.turning.set", &json!({"plan":plan})).unwrap();
+        assert!(s.execute("cam.turning.nc", &json!({"setup":"setup-1","expected_revision":revision})).is_err());
+        let roundtrip = solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap();
+        assert_eq!(roundtrip.turning, s.doc.turning);
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.doc.turning.as_ref().unwrap().setups[0].post.as_ref().unwrap().x_side, XSide::Negative);
+    }
 
     #[test]
     fn selected_contour_preview_add_revision_and_roundtrip() {
@@ -1093,6 +1133,7 @@ mod tests {
             ..Groove::default()
         };
         let op = |id: &str, kind: K, cutting| Operation {
+            spindle: None,
             id: id.into(),
             name: id.into(),
             kind,

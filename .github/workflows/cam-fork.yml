@@ -21,6 +21,10 @@ jobs:
       CARGO_BUILD_JOBS: '4'
       PYTHONUTF8: '1'
       CARGO_TERM_COLOR: always
+      # Windows may expose the user's temp directory through a short (8.3) path,
+      # which the agent sandbox deliberately refuses. Use the runner's full path.
+      TMP: ${{ runner.temp }}
+      TEMP: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable

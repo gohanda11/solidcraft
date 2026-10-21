@@ -11,6 +11,7 @@ pub mod catalog;
 pub mod holder_cad;
 pub mod insert;
 pub mod machining;
+pub mod post;
 pub mod presets;
 pub mod simulation;
 
@@ -35,6 +36,9 @@ pub struct TurningPlan {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Setup {
+    /// Optional machine dialect; absent in older plans, which keep their review fragment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post: Option<post::NlPost>,
     pub id: String,
     pub name: String,
     /// Planning dependency only. Stock transfer and a re-clamping transform are not computed.
@@ -139,6 +143,9 @@ impl OperationKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
+    /// Optional explicit override for the configured NC dialect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spindle: Option<post::Spindle>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cutting: Option<machining::sequence::Cutting>,
     pub id: String,
@@ -203,6 +210,7 @@ impl TurningPlan {
             machine: "NL2500".into(),
             material: String::new(),
             setups: vec![Setup {
+                post: Some(post::NlPost::default()),
                 id: "setup-1".into(),
                 name: "Setup 1".into(),
                 previous_setup: None,
@@ -241,6 +249,9 @@ impl TurningPlan {
             return invalid("total tool CAD display mesh budget exceeded");
         }
         for setup in &self.setups {
+            if let Some(post) = &setup.post {
+                post.validate()?;
+            }
             if let Some(end) = setup.cut_end_z_mm {
                 if !end.is_finite() || !(-1e6..=-0.001).contains(&end) {
                     return invalid("cut end must be a finite negative Z between -1000000 and -0.001 mm");
@@ -311,6 +322,9 @@ impl TurningPlan {
                 return invalid("at most 256 operations per setup");
             }
             for (index, operation) in setup.operations.iter().enumerate() {
+                if let Some(spindle) = &operation.spindle {
+                    spindle.validate()?;
+                }
                 if let Some(cutting) = &operation.cutting {
                     cutting.validate_draft(operation.kind)?;
                 }

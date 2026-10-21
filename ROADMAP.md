@@ -2,6 +2,10 @@
 
 ## Local turning CAM extension (2026-10-16)
 
+2026-10-21: NL conversational-reference review output adds signed diameter X, G99/G18,
+G50/G54..G59, T-code mapping, G96/G97 defaults and per-operation spindle overrides.
+Example auxiliary/return blocks require explicit selection. See [NL output settings](docs/turning-nl-post.md).
+
 2026-10-21: tool-first workflow: model/direction → stock/difference → tool/range →
 simulation → G-code. Twelve turret tools sit left of the shared 3D contour and the
 operation list sits right. Two contour endpoints define persisted OD/ID operations;
