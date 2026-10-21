@@ -1,0 +1,51 @@
+{
+  "commands": [
+    {
+      "command": "cam.turning.set",
+      "params": {
+        "plan": {
+          "machine": "NL2500",
+          "material": "SUS303",
+          "setups": [
+            {
+              "id": "setup-1",
+              "name": "Front setup / manual separation",
+              "previous_setup": null,
+              "stock": { "outer_diameter_mm": 50, "inner_diameter_mm": 0, "length_mm": 60 },
+              "turret": [
+                { "station": 1, "role": "center_drill", "tool_name": null, "offset_number": null },
+                { "station": 2, "role": "drill", "tool_name": null, "offset_number": null },
+                { "station": 3, "role": "vacant", "tool_name": null, "offset_number": null },
+                { "station": 4, "role": "vacant", "tool_name": null, "offset_number": null },
+                { "station": 5, "role": "id_rough", "tool_name": null, "offset_number": null },
+                { "station": 6, "role": "od_finish", "tool_name": null, "offset_number": null },
+                { "station": 7, "role": "id_finish", "tool_name": null, "offset_number": null },
+                { "station": 8, "role": "groove_or_thread", "tool_name": null, "offset_number": null },
+                { "station": 9, "role": "groove_or_thread", "tool_name": null, "offset_number": null },
+                { "station": 10, "role": "groove_or_thread", "tool_name": null, "offset_number": null },
+                { "station": 11, "role": "od_groove_rough", "tool_name": null, "offset_number": null },
+                { "station": 12, "role": "od_rough", "tool_name": null, "offset_number": null }
+              ],
+              "operations": [
+                { "id": "center", "name": "Center drill", "kind": "center_drill", "station": 1, "manual_separation": null },
+                { "id": "drill", "name": "Drill", "kind": "drill", "station": 2, "manual_separation": null },
+                { "id": "od-rough", "name": "OD rough", "kind": "od_rough", "station": 12, "manual_separation": null },
+                { "id": "id-rough", "name": "ID rough", "kind": "id_rough", "station": 5, "manual_separation": null },
+                { "id": "id-finish", "name": "ID finish", "kind": "id_finish", "station": 7, "manual_separation": null },
+                { "id": "od-finish", "name": "OD finish", "kind": "od_finish", "station": 6, "manual_separation": null },
+                {
+                  "id": "back-finish",
+                  "name": "Back contour finish / manual separation",
+                  "kind": "parting_finish",
+                  "station": null,
+                  "manual_separation": { "finished_bore_diameter_mm": 20, "stop_diameter_mm": 20 }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    { "command": "cam.turning.get", "params": {} }
+  ]
+}

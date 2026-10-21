@@ -1,0 +1,245 @@
+{
+  "commands": [
+    {
+      "command": "file.new",
+      "params": {
+        "name": "取り代検証サンプル — 段付き軸"
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XY",
+        "name": "外径輪郭"
+      }
+    },
+    {
+      "command": "sketch.line",
+      "params": {
+        "points": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            10
+          ],
+          [
+            -20,
+            10
+          ],
+          [
+            -20,
+            20
+          ],
+          [
+            -40,
+            20
+          ],
+          [
+            -40,
+            25
+          ],
+          [
+            -60,
+            25
+          ],
+          [
+            -60,
+            0
+          ]
+        ],
+        "closed": true
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "solid.revolve",
+      "params": {
+        "axis": "X",
+        "angle": "360 deg",
+        "body_name": "段付き軸",
+        "name": "旋削サンプル"
+      }
+    },
+    {
+      "command": "cam.turning.set",
+      "params": {
+        "plan": {
+          "machine": "NL2500 - REVIEW SAMPLE",
+          "material": "SUS303 - SAMPLE CONDITIONS ONLY",
+          "setups": [
+            {
+              "id": "setup-1",
+              "name": "段取り1 · 端面と外径",
+              "previous_setup": null,
+              "stock": {
+                "outer_diameter_mm": 60,
+                "inner_diameter_mm": 0,
+                "length_mm": 82
+              },
+              "turret": [
+                {
+                  "station": 1,
+                  "role": "center_drill",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 2,
+                  "role": "drill",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 3,
+                  "role": "vacant",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 4,
+                  "role": "vacant",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 5,
+                  "role": "id_rough",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 6,
+                  "role": "od_finish",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 7,
+                  "role": "id_finish",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 8,
+                  "role": "groove_or_thread",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 9,
+                  "role": "groove_or_thread",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 10,
+                  "role": "groove_or_thread",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 11,
+                  "role": "od_groove_rough",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 12,
+                  "role": "od_rough",
+                  "tool_name": null,
+                  "offset_number": null
+                }
+              ],
+              "operations": [
+                {
+                  "id": "op-1",
+                  "kind": "face_rough",
+                  "name": "端面荒",
+                  "station": 12,
+                  "manual_separation": null
+                },
+                {
+                  "id": "op-2",
+                  "kind": "od_rough",
+                  "name": "外径荒",
+                  "station": 12,
+                  "manual_separation": null
+                },
+                {
+                  "id": "op-3",
+                  "kind": "face_finish",
+                  "name": "端面仕上げ",
+                  "station": 6,
+                  "manual_separation": null
+                },
+                {
+                  "id": "op-4",
+                  "kind": "od_finish",
+                  "name": "外径仕上げ",
+                  "station": 6,
+                  "manual_separation": null
+                }
+              ],
+              "od_job": {
+                "profile": [
+                  {
+                    "z_mm": 0,
+                    "diameter_mm": 20
+                  },
+                  {
+                    "z_mm": -20,
+                    "diameter_mm": 20
+                  },
+                  {
+                    "z_mm": -20,
+                    "diameter_mm": 40
+                  },
+                  {
+                    "z_mm": -40,
+                    "diameter_mm": 40
+                  },
+                  {
+                    "z_mm": -40,
+                    "diameter_mm": 50
+                  },
+                  {
+                    "z_mm": -60,
+                    "diameter_mm": 50
+                  }
+                ],
+                "stock_front_z_mm": 2,
+                "chuck_front_z_mm": -70,
+                "radial_stock_to_leave_mm": 0.1,
+                "axial_stock_to_leave_mm": 0.1,
+                "radial_depth_mm": 2,
+                "face_depth_mm": 1,
+                "clearance_mm": 2,
+                "rough_feed_mm_rev": 0.2,
+                "finish_feed_mm_rev": 0.1,
+                "finish": true
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "command": "cam.turning.toolpath",
+      "params": {
+        "setup": "setup-1"
+      }
+    },
+    {
+      "command": "view.apply",
+      "params": {
+        "view": "iso"
+      }
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 /target*/
 /plan/
+/.codex-remote-attachments/
 /dist/
 *~
 .DS_Store

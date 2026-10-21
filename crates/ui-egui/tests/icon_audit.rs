@@ -401,7 +401,9 @@ fn requested_menu_icons_have_artwork_and_match_manifest() {
     if std::env::var("UPDATE_ICON_MANIFEST").as_deref() == Ok("1") {
         std::fs::write(&path, &manifest).unwrap();
     } else {
-        let expected = std::fs::read_to_string(&path).unwrap_or_default();
+        // Git may check this text fixture out with CRLF on Windows. Compare the
+        // discovered ids and placeholder flags, independently of checkout line endings.
+        let expected = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
         assert_eq!(
             expected, manifest,
             "Runtime icon discovery changed. Regenerate with UPDATE_ICON_MANIFEST=1 cargo test -p solidcraft-ui-egui --test icon_audit"

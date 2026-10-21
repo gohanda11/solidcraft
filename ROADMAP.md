@@ -1,5 +1,69 @@
 # SolidCraft roadmap
 
+- 旋削CAM：2Dの「輪郭→材料→工程→シミュレーション・NC」に統合。段階別パネル、工具／線のダブルクリック編集、閉断面の自動抽出と反転、線の分割、公差・ねじ注記、Undo可能なリセットを追加。ねじ・裏返し・突っ切りの未対応経路はNC出力を拒否。
+
+## Local turning CAM extension (2026-10-16)
+
+2026-10-21: independent decoding of exported review NC checks stepped OD/ID,
+drilling and OD groove allowances, feeds and nominal retracts against analytic
+dimensions. The NL reference differences and remaining machine checks are recorded
+in [the NC audit](docs/turning-nc-audit.md). The UI settling fixture now uses a valid
+in-plane revolve axis and verifies that its preview geometry can be generated.
+
+2026-10-21: NL conversational-reference review output adds signed diameter X, G99/G18,
+G50/G54..G59, T-code mapping, G96/G97 defaults and per-operation spindle overrides.
+Example auxiliary/return blocks require explicit selection. See [NL output settings](docs/turning-nl-post.md).
+
+2026-10-21: tool-first workflow: model/direction → stock/difference → tool/range →
+simulation → G-code. Twelve turret tools sit left of the shared 3D contour and the
+operation list sits right. Two contour endpoints define persisted OD/ID operations;
+per-operation allowances drive rough/finish proposals with explicit preview and add.
+Conservative prior-operation stock replay rejects unprepared finish/bore entry and
+proposes rough + finish for heavy stock. Partial paths, simulation and disarmed NC
+retain operation IDs. Drill, groove and face operations retain dimension-based editing.
+
+This working copy starts an independent NL2500 turning CAM extension. Planning data,
+the owner's turret template, document persistence and `cam.turning.*` commands are implemented.
+The Turning workspace now edits setups, stock, the 12-station turret and operation order,
+including parting finish with manual separation,
+with a visible operation-add button, a draft form grouped by machining type, tool and insertion
+position previews, cancellation without document edits, and direct guided operation settings.
+Manual front-face and monotone OD profiles
+now produce nominal-tip rough/finish paths, a radial/axial allowance audit, a 2D preview
+and disarmed G00/G01 review NC. Coaxial cylinders, tapers, shoulders and recognized circular
+fillets can now be read from a solid or imported STEP, previewed and applied with source
+checks before machining. Circular fillets use material-preserving polylines with 0.001 mm normal tolerance.
+Through-bore profiles now support model extraction, ID rough/finish paths (stations 5/7),
+independent ID cutting conditions, inward clearance, combined OD/ID stock audits and review NC.
+All roughing precedes finishing. A pre-bore covering the ID profile is required; it can now be
+created by a preceding axial drill. Drilling supports full-retract pecks and cone-depth checks.
+Rectangular OD grooves have separate rough/finish operations, tool-width-aware plunges and
+radial/per-wall allowances, followed by bottom/wall finishing. Both have per-operation UI,
+nominal 3D stock replay and ordered disarmed review NC. ID/face grooves and part-off paths
+remain unsupported; tool nose compensation and machine-ready posts remain unverified.
+The CAM workspace now keeps the shared 3D viewport visible: model picking, half section,
+nominal-tip path playback, planned rough/stock envelopes, per-operation conditions and a floating
+NC viewer. Picking a profile point sets a shared OD/ID end plane through an undoable command;
+source profiles remain intact. The 2D allowance audit remains available as a detail view.
+Step 5 now replays nominal-tip stock removal and conservatively checks confirmed rectangular
+or cylindrical holder envelopes against remaining stock and the chuck-front half-space.
+Candidates can pause 3D playback; missing tool geometry stays explicitly unchecked.
+Rounded triangular insert sections now sweep along moves and subtract material at axial sample
+planes, retaining disconnected radial bands and reporting rapid contact / finished-part gouging.
+R0.4 and editable trial dimensions are shown in 3D. Material lists offer explicit application of
+gentle / standard / productive trial depths and feeds while preserving allowances and setup limits.
+A curated Kyocera dimensional library now includes 39 triangular inserts and 24 right-hand
+OD/ID holders, with official page references, seat checks, saved station assignments and
+independent simplified 3D previews. Users can now register local holder and insert STEP files independently, retaining
+a bounded display mesh with their design and viewing it in the shared 3D viewport. An unmounted
+job tool library also retains downloaded holder/insert STEP models independently of turret assignments.
+Vendor CAD is not bundled; mounted orientation and collision geometry still require separate verification.
+Automatic nose compensation, flank/chipbreaker physics, detailed jaws/turret/tool changes,
+other operations, stock transfer between setups and machine-ready NC remain unimplemented.
+Face rough and face finish are explicit operations; all roughing precedes finishing.
+New jobs use the owner's 0.1 mm radial/axial allowance, and G-code can be viewed/copied in the app.
+See [the agreed scope and implementation plan](docs/turning-cam.md). Upstream status below is unchanged.
+
 Status as of **2026-10-14**. SolidCraft supports parametric modelling (sketch →
 features → parametric timeline) as an open, pure-Rust, agent-drivable application.
 

@@ -67,6 +67,7 @@ pub use expr::Expr;
 pub use names::{BodyName, FeatureName, SketchId};
 pub use params::{ParamRow, ParamUser, cycles};
 pub use points::{Dir, FacePick, Position, plain};
+pub use solidcraft_cam as cam;
 pub use solidcraft_kernel as kernel;
 pub use solidcraft_sketch as sketch;
 

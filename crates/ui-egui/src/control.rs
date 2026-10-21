@@ -260,15 +260,14 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
     let b = |k: &str| p.get(k).and_then(Value::as_bool).unwrap_or(false);
     match method {
         "ui.workspace" => {
-            if let Some(workspace) = s("workspace") {
-                if !matches!(workspace, "design" | "render") {
-                    return err("workspace must be design or render");
-                }
-                if let Err(e) = crate::render_workspace::enter(app, workspace == "render") {
-                    return err(e);
-                }
+            if let Some(workspace) = s("workspace")
+                && let Err(e) = crate::turning_workspace::enter(app, workspace)
+            {
+                return err(e);
             }
-            ok(json!({"workspace":if crate::render_workspace::active(app) {"render"} else {"design"}}))
+            ok(
+                json!({"workspace":if crate::render_workspace::active(app) {"render"} else if crate::turning_workspace::active(app) {"turning"} else {"design"}}),
+            )
         }
         "engine.execute" | "command" => {
             let Some(id) = s("command").or(s("id")) else { return err("missing `command`") };
@@ -308,7 +307,8 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             "dialog": app.dialog.as_ref().map(|d| format!("{d:?}")),
             "status": app.status.as_ref().map(|(text, _, error)| json!({"text": text, "error": error})),
             "hover": app.viewport.hover.as_ref().map(|h| format!("{h:?}")),
-            "renderer": if app.viewport.gpu.is_some() { "gpu" } else { "cpu" },
+            "renderer": if app.viewport.gpu.is_none() { "cpu" } else if app.software_renderer { "gpu-software" } else { "gpu" },
+            "graphics_adapter": app.graphics_adapter,
             "frame_ms": app.frame_ms,
             "file_busy": app.file_load.busy(),
             "file_picker_busy": app.file_picker_busy(),
@@ -369,8 +369,13 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             }
             match (serde_json::from_value::<crate::UiState>(cur), serde_json::from_value::<solidcraft_engine::Visibility>(vis)) {
                 (Ok(mut u), Ok(v)) => {
-                    if (u.tab == "RENDER") != crate::render_workspace::active(app)
-                        && let Err(e) = crate::render_workspace::enter(app, u.tab == "RENDER")
+                    let workspace = |tab: &str| match tab {
+                        "RENDER" => "render",
+                        "TURNING" => "turning",
+                        _ => "design",
+                    };
+                    if workspace(&u.tab) != workspace(&app.ui.tab)
+                        && let Err(e) = crate::turning_workspace::enter(app, workspace(&u.tab))
                     {
                         return err(e);
                     }

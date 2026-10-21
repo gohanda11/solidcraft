@@ -58,7 +58,10 @@ fn representative(h: &Harness, command: &str) -> Dialog {
         } else if input.accept & CURVES != 0 || command == "sheet.fold" && index == 0 {
             vec![Sel::SketchCurve { id: path.clone() }]
         } else if input.accept & AXES != 0 {
-            vec![Sel::Axis { name: "Z".into() }]
+            // These profiles lie in XY. Revolving about its normal is invalid and a
+            // background preview error would change the form's content mid-test.
+            let axis = if matches!(command, "solid.revolve" | "surface.revolve") { "Y" } else { "Z" };
+            vec![Sel::Axis { name: axis.into() }]
         } else if input.accept & (FACES | PLANAR_FACES) != 0 {
             vec![face_sel(s, point).unwrap()]
         } else if input.accept & EDGES != 0 {
@@ -295,11 +298,19 @@ fn new_cards_settle_before_the_first_click_in_both_layouts() {
             let mut h = fixture();
             h.call("ui.set", json!({"layout":mode}));
             h.call("ui.resize", json!({"width":1400,"height":950}));
-            h.app.dialog = Some(representative(&h, command));
+            let dialog = representative(&h, command);
+            if command == "solid.revolve" {
+                // Check the fixture's geometry as well as its parameter syntax. A bad
+                // axis used to make this layout check depend on preview thread timing.
+                let commands = apply_commands(&h.app, &dialog).unwrap();
+                h.app.session.preview(&commands).unwrap();
+            }
+            h.app.dialog = Some(dialog);
             h.frames(2);
             let first = scenario::rect_of("dialog:footer").unwrap();
             h.frames(1);
             let settled = scenario::rect_of("dialog:footer").unwrap();
+            assert!(h.app.preview.error.is_none(), "{command} {mode:?}: {:?}", h.app.preview.error);
             assert_eq!(first, settled, "{command} {mode:?}: footer moved under the first click");
         }
     }

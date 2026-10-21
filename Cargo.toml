@@ -15,6 +15,7 @@ repository = "https://github.com/bherbruck/solidcraft"
 [workspace.dependencies]
 # internal
 solidcraft-geom = { path = "crates/geom" }
+solidcraft-cam = { path = "crates/cam" }
 solidcraft-sketch = { path = "crates/sketch" }
 solidcraft-kernel = { path = "crates/kernel" }
 solidcraft-render = { path = "crates/render" }

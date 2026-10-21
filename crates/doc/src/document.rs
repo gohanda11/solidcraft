@@ -2372,6 +2372,9 @@ pub struct DesignLink {
 /// The document.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Document {
+    /// Turning process intent. No toolpaths or machine output are stored in this first slice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turning: Option<std::sync::Arc<crate::cam::TurningPlan>>,
     /// Named, renderer-independent setups. Device/job state is never saved here.
     #[serde(default, skip_serializing_if = "crate::render_settings::RenderSettings::is_empty")]
     pub render: std::sync::Arc<crate::render_settings::RenderSettings>,
@@ -2603,6 +2606,7 @@ impl Default for Document {
 impl Document {
     pub fn new(name: &str) -> Self {
         Document {
+            turning: None,
             render: Default::default(),
             format: default_format(),
             format_pending: crate::format::pending_names(),
@@ -2921,6 +2925,9 @@ impl Document {
         let d = crate::format::read(s)?;
         if d.features.len() > MAX_FEATURES || d.params.len() > MAX_PARAMS {
             return Err(DocError::Invalid("document too large".into()));
+        }
+        if let Some(plan) = &d.turning {
+            plan.validate().map_err(|e| DocError::Invalid(e.to_string()))?;
         }
         Ok(d)
     }

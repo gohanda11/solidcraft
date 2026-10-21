@@ -612,7 +612,11 @@ fn main() -> eframe::Result {
                 app.load_prefs(&p);
             }
             if let Some(rs) = &cc.wgpu_render_state {
-                eprintln!("SolidCraft graphics: {:?}, MSAA {}x (requested {}x)", rs.adapter.get_info().backend, rs.msaa_samples, samples);
+                let adapter = rs.adapter.get_info();
+                eprintln!(
+                    "SolidCraft graphics: {} ({:?}, {:?}), MSAA {}x (requested {}x)",
+                    adapter.name, adapter.backend, adapter.device_type, rs.msaa_samples, samples
+                );
                 solidcraft_engine::crash::phase("viewport pipelines (shader compile)");
                 app.set_wgpu(rs, depth_bits, STENCIL_BITS, rs.msaa_samples);
                 solidcraft_ui_egui::gpu::install_picture_renderer(rs);
