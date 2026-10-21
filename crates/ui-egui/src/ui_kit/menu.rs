@@ -253,13 +253,14 @@ pub(crate) fn workspace_menu(ui: &mut egui::Ui, items: &[Item], key_row: Option<
         ui.add_space(t.space_8);
         egui::ScrollArea::vertical().id_salt("workspace_menu_rows").max_height((height - 116.0).max(60.0)).show(ui, |ui| {
             for (k, item) in items.iter().enumerate() {
-                let (slug, description, tabs) = match item.label.as_str() {
-                    "Design" => ("design", "ui.workspace_design_description", Some("ui.workspace_design_tabs")),
-                    "Render" => ("render", "ui.workspace_render_description", Some("ui.workspace_render_tabs")),
-                    "Animation" => ("animation", "ui.workspace_animation_description", None),
-                    "Simulation" => ("simulation", "ui.workspace_simulation_description", None),
-                    "Manufacture" => ("manufacture", "ui.workspace_manufacture_description", None),
-                    "Drawing" => ("drawing", "ui.workspace_drawing_description", None),
+                let (slug, description, tabs) = match (item.id.as_str(), item.label.as_str()) {
+                    ("ui.workspace.design", _) => ("design", "ui.workspace_design_description", Some("ui.workspace_design_tabs")),
+                    ("ui.workspace.render", _) => ("render", "ui.workspace_render_description", Some("ui.workspace_render_tabs")),
+                    ("ui.workspace.turning", _) => ("turning", "cam.workspace_description", Some("cam.workspace_steps")),
+                    ("ui.workspace", "Animation") => ("animation", "ui.workspace_animation_description", None),
+                    ("ui.workspace", "Simulation") => ("simulation", "ui.workspace_simulation_description", None),
+                    ("ui.workspace", "Manufacture") => ("manufacture", "ui.workspace_manufacture_description", None),
+                    ("ui.workspace", "Drawing") => ("drawing", "ui.workspace_drawing_description", None),
                     _ => continue,
                 };
                 let planned = tabs.is_none();

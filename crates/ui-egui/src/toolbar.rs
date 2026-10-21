@@ -797,7 +797,7 @@ fn ribbon_tabs(app: &mut SolveApp, ui: &mut egui::Ui, row: Rect) {
     let search_width = crate::ui_kit::CommandSearch::closed_width(ui.ctx());
     // The first tab and the search field sit the same distance from the card's top, left and right
     // edges, so their outer corners are concentric with the card's corners.
-    let floating = app.ui.layout == crate::shell::LayoutMode::Floating;
+    let floating = app.ui.layout == crate::shell::LayoutMode::Floating && !crate::turning_workspace::active(app);
     let inset = RIBBON_TAB_INSET;
     let corner = if floating { t.radius_lg.saturating_sub(inset as u8).max(2) } else { 5 };
     let search = Rect::from_min_size(pos2(row.right() - search_width - inset, row.top() + inset), vec2(search_width, TAB_ROW_HEIGHT - 2.0 * inset));
@@ -900,7 +900,7 @@ fn dropdown_arrow(painter: &egui::Painter, at: egui::Pos2, ink: Color32) {
 pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
     let t = Tokens::get();
     crate::workspace::sync_context(app);
-    let floating = app.ui.layout == crate::shell::LayoutMode::Floating;
+    let floating = app.ui.layout == crate::shell::LayoutMode::Floating && !crate::turning_workspace::active(app);
     let cards = crate::shell::Cards::new(ui.available_rect_before_wrap(), app.ui.layout);
     let height = if floating { cards.bottom - ui.available_rect_before_wrap().top() } else { RIBBON_HEIGHT };
     let fill = if floating { Color32::TRANSPARENT } else { t.toolbar };
@@ -940,7 +940,20 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
         let render = crate::render_workspace::active(app);
         let workspace_icon = if render { "ws_render" } else { "ws_design" };
         icons::paint_icon(&painter, Rect::from_center_size(pos2(ws.center().x, ws.top() + 39.0), vec2(30.0, 30.0)), workspace_icon, 1.0);
-        ribbon_text(ui, pos2(ws.center().x, ws.top() + 69.0), app.tr(if render { "ui.render" } else { "ui.design" }), t.font_button, t.text, true);
+        ribbon_text(
+            ui,
+            pos2(ws.center().x, ws.top() + 69.0),
+            app.tr(if render {
+                "ui.render"
+            } else if crate::turning_workspace::active(app) {
+                "cam.workspace"
+            } else {
+                "ui.design"
+            }),
+            t.font_button,
+            t.text,
+            true,
+        );
         let label = app.tr("ui.ribbon_workspace");
         let label_width =
             painter.layout_no_wrap(label.to_string(), FontId::proportional(crate::theme::Tokens::get().font_small), t.text_dim).size().x;
@@ -965,6 +978,9 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
         };
         let mut px = ribbon_left;
         let top = r.top() + TAB_ROW_HEIGHT;
+        if crate::turning_workspace::active(app) {
+            crate::turning_workspace::toolbar(app, ui, pos2(px + 8.0, top + 5.0));
+        }
         let mut drop: Option<(&'static str, &'static str, Option<&'static str>)> = None;
         let mut menu: Option<(egui::Pos2, &'static str)> = None;
         // A drop-down row's pin icon clicked: pin or unpin that command.

@@ -361,10 +361,16 @@ pub fn items(app: &SolveApp, target: &Target) -> Vec<Item> {
         Target::Workspace => {
             let rendering = crate::render_workspace::active(app);
             let mut v = vec![
-                act("ui.workspace.design", "Design", "ws_design").with(json!({"workspace":"design"})).key(if rendering { "" } else { "current" }),
+                act("ui.workspace.design", "Design", "ws_design")
+                    .with(json!({"workspace":"design"}))
+                    .key(if rendering || crate::turning_workspace::active(app) { "" } else { "current" }),
                 act("ui.workspace.render", "Render", "ws_render")
                     .with(json!({"workspace":"render"}))
                     .key(if rendering { "current" } else { "" })
+                    .on(app.session.active_sketch.is_none() && app.tool.is_none() && app.dialog.is_none() && !app.file_load.busy()),
+                act("ui.workspace.turning", app.tr("cam.workspace"), "box")
+                    .with(json!({"workspace":"turning"}))
+                    .key(if crate::turning_workspace::active(app) { "current" } else { "" })
                     .on(app.session.active_sketch.is_none() && app.tool.is_none() && app.dialog.is_none() && !app.file_load.busy()),
             ];
             for (w, icon) in [("Animation", "ws_animate"), ("Simulation", ""), ("Manufacture", ""), ("Drawing", "ws_drawing")] {
@@ -1168,9 +1174,9 @@ pub fn run_item(app: &mut SolveApp, item: &Item, at: Pos2) {
         "ui.toolbarPin" | "ui.toolbarRemove" | "ui.toolbarReset" | "ui.toolbarCustomize" | "ui.shortcutPin" => {
             crate::toolbar_custom::run(app, &item.id, &p)
         }
-        "ui.workspace" | "ui.workspace.design" | "ui.workspace.render" => {
+        "ui.workspace" | "ui.workspace.design" | "ui.workspace.render" | "ui.workspace.turning" => {
             if let Some(workspace) = p.get("workspace").and_then(Value::as_str)
-                && let Err(e) = crate::render_workspace::enter(app, workspace == "render")
+                && let Err(e) = crate::turning_workspace::enter(app, workspace)
             {
                 app.set_status(e, true);
             }
@@ -2039,14 +2045,14 @@ mod workspace_menu_tests {
         h.call("ui.resize", json!({"width":1200,"height":1000}));
         h.step(&json!({"click":{"handle":"ribbon:workspace"}})).unwrap();
         let opener = rect_of("ribbon:workspace").unwrap();
-        let rows: Vec<_> = ["design", "render", "animation", "simulation", "manufacture", "drawing"]
+        let rows: Vec<_> = ["design", "render", "turning", "animation", "simulation", "manufacture", "drawing"]
             .iter()
             .map(|slug| rect_of(&format!("workspace:menu:{slug}")).unwrap())
             .collect();
         assert!(rows.windows(2).all(|pair| pair[0].bottom() <= pair[1].top()));
         assert!(rows[0].top() > opener.bottom());
         assert_eq!(rows[0].width(), 450.0);
-        assert!(items(&h.app, &Target::Workspace).iter().skip(2).all(|item| !item.enabled));
+        assert!(items(&h.app, &Target::Workspace).iter().skip(3).all(|item| !item.enabled));
         h.step(&json!({"click":{"handle":"workspace:menu:animation"}})).unwrap();
         assert!(!crate::render_workspace::active(&h.app));
         assert!(h.app.viewport.context_menu.is_some());
