@@ -37,6 +37,11 @@ pub(super) fn settings(ui: &mut egui::Ui, setup: &mut Setup, state: &mut State, 
         guided::go(state, 3);
         return;
     }
+    tool_settings(ui, setup, state, library);
+    report_settings(ui, setup, state, revision);
+}
+
+pub(super) fn tool_settings(ui: &mut egui::Ui, setup: &mut Setup, state: &mut State, library: &[cam::holder_cad::LibraryEntry]) {
     super::catalog_ui::show(ui, setup, state, library);
     ui.label(tr("cam.sim_scope"));
     if button(ui, "cam_insert_all", "cam.insert_all") {
@@ -53,7 +58,7 @@ pub(super) fn settings(ui: &mut egui::Ui, setup: &mut Setup, state: &mut State, 
         }
     }
     ui.small(tr("cam.insert_assumed"));
-    let panel = controls::section(ui, tr("cam.sim_tool_settings"), |ui| {
+    let panel = controls::section_default(ui, tr("cam.sim_tool_settings"), state.tool_editor.is_some(), |ui| {
         controls::dropdown(ui, "cam_sim_station", (format!("T{:02}", state.simulation.selected_station)).to_string(), |ui| {
             for slot in setup.turret.iter().filter(|s| s.role != ToolRole::Vacant) {
                 controls::value(
@@ -84,19 +89,20 @@ pub(super) fn settings(ui: &mut egui::Ui, setup: &mut Setup, state: &mut State, 
             tool.insert = None;
         }
         let mut radius = tool.nose_radius_mm.unwrap_or(0.);
-        ui.horizontal(|ui| {
-            ui.label(tr("cam.sim_nose"));
-            let before = radius;
-            controls::dropdown(ui, "cam_insert_radius", (format!("R{radius:.2}")).to_string(), |ui| {
-                for r in [0.1, 0.2, 0.4, 0.8, 1.2, 1.6] {
-                    controls::value(ui, &mut radius, r, format!("R{r}"));
-                }
-            });
-            ui_kit::number_field(ui, &mut radius, 0.05..=2., 0.05, " mm");
-            if radius != before {
-                tool.nose_radius_mm = Some(radius);
+        ui.label(tr("cam.sim_nose"));
+        let before = radius;
+        controls::dropdown(ui, "cam_insert_radius", (format!("R{radius:.2}")).to_string(), |ui| {
+            for r in [0.1, 0.2, 0.4, 0.8, 1.2, 1.6] {
+                controls::value(ui, &mut radius, r, format!("R{r}"));
             }
         });
+        ui.horizontal(|ui| {
+            ui_kit::number_field(ui, &mut radius, 0.05..=2., 0.05, " mm");
+            ui.label(tr("cam.sim_nose"));
+        });
+        if radius != before {
+            tool.nose_radius_mm = Some(radius);
+        }
         let mut enabled = tool.insert.is_some();
         if ui.add_enabled_ui(tool.triangular_insert, |ui| ui_kit::checkbox(ui, tr("cam.insert_enable"), &mut enabled)).inner.changed() {
             tool.insert =
@@ -164,6 +170,9 @@ pub(super) fn settings(ui: &mut egui::Ui, setup: &mut Setup, state: &mut State, 
     });
     crate::scenario::publish_rect("cam_sim_tool_settings", panel.header_rect);
     crate::scenario::publish_handle("cam_sim_tool_settings", panel.header_rect.center());
+}
+
+pub(super) fn report_settings(ui: &mut egui::Ui, setup: &Setup, state: &mut State, revision: u64) {
     ui.separator();
     ui.horizontal(|ui| {
         ui.label(tr("cam.sim_resolution"));
@@ -272,9 +281,10 @@ pub(super) fn process(app: &mut SolveApp, state: &mut State) {
             state.machining.show = true;
             state.machining.step = 0;
             state.machining.show_nc = false;
+            state.machining.action = Some(machining_ui::Action::InspectNc(r.setup.clone(), r.revision));
             state.simulation.report = Some((r.revision, r.setup, r.simulation));
             state.simulation.error = None;
-            state.spatial.two_d = false;
+            state.spatial.two_d = true;
         }
         Err(e) => state.simulation.error = Some(e),
     }

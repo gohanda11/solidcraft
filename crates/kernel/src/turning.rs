@@ -76,15 +76,21 @@ impl Span {
 /// the one common axis. Flats, cross holes, mesh bodies and unsupported curves fail
 /// as a whole instead of silently omitting faces. Reverse selects the opposite end.
 pub fn turning_outline(body: &Body, reverse: bool) -> Result<TurningOutline> {
-    outline(body, reverse, false)
+    outline(body, reverse, false, false)
 }
 
 /// Extract only a continuous through bore. Blind holes and multiple radial walls are refused.
 pub fn turning_inner_outline(body: &Body, reverse: bool) -> Result<TurningOutline> {
-    outline(body, reverse, true)
+    outline(body, reverse, true, false)
 }
 
-fn outline(body: &Body, reverse: bool, inner: bool) -> Result<TurningOutline> {
+/// Inner boundary for a section drawing, including the axis in solid regions.
+/// This does not claim that a blind bore is reachable by the through-bore planner.
+pub fn turning_section_inner_outline(body: &Body, reverse: bool) -> Result<TurningOutline> {
+    outline(body, reverse, true, true)
+}
+
+fn outline(body: &Body, reverse: bool, inner: bool, section: bool) -> Result<TurningOutline> {
     guard("turning outline", || {
         const TOL: f64 = 1e-6;
         if body.is_mesh() || body.shell_count() != 1 || body.face_count() > 512 || body.edge_count() > 4096 || !body.validity().is_empty() {
@@ -170,10 +176,13 @@ fn outline(body: &Body, reverse: bool, inner: bool) -> Result<TurningOutline> {
             let mut active: Vec<_> = spans.iter().filter(|s| s.lo < mid && s.hi > mid).copied().collect();
             active.sort_by(|a, b| a.radius(mid).total_cmp(&b.radius(mid)));
             active.dedup_by(|a, b| (a.radius(lo) - b.radius(lo)).abs() <= TOL && (a.radius(hi) - b.radius(hi)).abs() <= TOL);
-            if inner && (active.len() != 2 || active.first().is_none_or(|s| s.radius(lo).min(s.radius(hi)) <= TOL)) {
+            if inner && !section && (active.len() != 2 || active.first().is_none_or(|s| s.radius(lo).min(s.radius(hi)) <= TOL)) {
                 return Err(fail(
                     "inner profile requires one continuous through bore; blind holes, solid sections and multiple radial walls are unsupported",
                 ));
+            }
+            if section && !(1..=2).contains(&active.len()) {
+                return Err(fail("section requires a single radial material band"));
             }
             let outer = active.iter().max_by(|a, b| a.radius(mid).total_cmp(&b.radius(mid))).ok_or_else(|| fail("disconnected axial profile"))?;
             if active.iter().any(|s| s.radius(lo) > outer.radius(lo) + TOL || s.radius(hi) > outer.radius(hi) + TOL) {
@@ -181,7 +190,7 @@ fn outline(body: &Body, reverse: bool, inner: bool) -> Result<TurningOutline> {
             }
             let selected = if inner { active.first().ok_or_else(|| fail("no through bore"))? } else { outer };
             for z in [hi, lo] {
-                let p = (z - front, 2.0 * selected.radius(z).max(0.0));
+                let p = (z - front, if section && active.len() == 1 { 0.0 } else { 2.0 * selected.radius(z).max(0.0) });
                 if points.last().is_some_and(|q| (q.0 - p.0).abs() < TOL && (q.1 - p.1).abs() < TOL) {
                     continue;
                 }
@@ -211,6 +220,25 @@ fn outline(body: &Body, reverse: bool, inner: bool) -> Result<TurningOutline> {
 mod tests {
     use super::*;
     use solidcraft_geom::{Loop2, Plane, Region2, Vec2};
+
+    #[test]
+    fn section_closes_solid_and_blind_regions_on_the_axis() {
+        let solid = turning_section_inner_outline(&stepped(), false).unwrap();
+        assert!(solid.points.iter().all(|p| p.1 == 0.));
+        let p = [(0., 10.), (0., 20.), (-60., 20.), (-60., 0.), (-40., 0.), (-40., 10.)];
+        let region = Region2 { outer: Loop2::polygon(&p.map(|(x, y)| Vec2::new(x, y))), holes: vec![] };
+        let bodies = crate::revolve(&Plane::XY, &[region], Vec2::ZERO, Vec2::new(1., 0.), std::f64::consts::TAU).unwrap();
+        let body = &bodies[0];
+        assert!(turning_inner_outline(body, false).is_err());
+        let boundary = turning_section_inner_outline(body, false).unwrap();
+        assert_eq!(boundary.points.len(), 4);
+        for (actual, expected) in boundary.points.iter().zip([(0., 20.), (-40., 20.), (-40., 0.), (-60., 0.)]) {
+            assert!((actual.0 - expected.0).abs() < 1e-6 && (actual.1 - expected.1).abs() < 1e-6);
+        }
+        let reversed = turning_section_inner_outline(body, true).unwrap();
+        assert!(reversed.points.first().unwrap().1.abs() < 1e-6);
+        assert!((reversed.points.last().unwrap().1 - 20.).abs() < 1e-6);
+    }
 
     fn stepped() -> Body {
         let p = [(0., 0.), (0., 10.), (-20., 10.), (-20., 20.), (-40., 20.), (-40., 25.), (-60., 25.), (-60., 0.)];

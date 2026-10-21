@@ -36,9 +36,13 @@ pub(super) struct Section {
 }
 
 pub(super) fn section(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) -> Section {
+    section_default(ui, label, false, add)
+}
+
+pub(super) fn section_default(ui: &mut egui::Ui, label: &str, open: bool, add: impl FnOnce(&mut egui::Ui)) -> Section {
     let t = Tokens::get();
     let header_rect =
         egui::Rect::from_min_size(ui.next_widget_position() + egui::vec2(0.0, t.space_2), egui::vec2(ui.available_width(), t.control_height));
-    ui_kit::section(ui, label, label, false, add);
+    ui_kit::section(ui, label, label, open, add);
     Section { header_rect }
 }

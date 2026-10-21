@@ -35,7 +35,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("cam.turning.profile", "Read Turning Profile from Model", profile).icon("inspect").doc_only().noundo()
         .params("body: evaluated body name, reverse?: false, inner?: false. Recognizes coaxial cylinders/cones/circular fillets and perpendicular planes; returns exterior or through-bore profile, front frame and revision without changing the plan. Other geometry is refused."),
     CommandSpec::new("cam.turning.profile.apply", "Use Model Turning Profile", apply_profile).icon("settings").doc_only()
-        .params("body, reverse?: false, inner?: false, setup, expected_revision. Re-extracts and atomically replaces the selected OD/ID profile and its source; preserves existing cutting conditions and stock. First ID apply copies OD conditions and inserts ID rough/finish at stations 5/7. Undoable."),
+        .params("body, reverse?: false, inner?: false, all?: false, setup, expected_revision, create_operations?: true. all extracts a closed outer/front/inner/back section atomically without adding operations; solid regions close on the axis, blind inner regions are display-only. Otherwise replaces only OD or ID; first ID apply can insert rough/finish operations. Preserves cutting conditions and stock. Undoable."),
     CommandSpec::new("cam.turning.toolpath", "Calculate Turning Toolpath", toolpath).icon("inspect").doc_only().noundo()
         .params("setup: setup id. Calculates configured face/OD/ID profiles, axial drilling and rectangular OD groove rough/finish in operation order. All roughing and drilling precede finishing. ID needs an existing bore or an earlier drill reaching the full profile depth. Nominal cutting references; no automatic nose compensation."),
     CommandSpec::new("cam.turning.nc", "Export Turning Review NC", nc).icon("export").doc_only().noundo()
@@ -358,6 +358,8 @@ struct ApplyProfile {
     inner: bool,
     #[serde(default = "default_true")]
     create_operations: bool,
+    #[serde(default)]
+    all: bool,
 }
 fn default_true() -> bool {
     true
@@ -368,6 +370,9 @@ fn apply_profile(s: &mut Session, p: &Value) -> Result<Value> {
     let req: ApplyProfile = serde_json::from_value(p.clone()).map_err(|e| bad(cmd, e.to_string()))?;
     if req.expected_revision != s.revision {
         return Err(bad(cmd, "design changed; read the model profile again"));
+    }
+    if req.all {
+        return apply_section(s, &req);
     }
     let (source, profile) = extract(s, &req.body, req.reverse, req.inner)?;
     let mut plan = s.doc.turning.as_deref().cloned().ok_or_else(|| bad(cmd, "create a turning plan first"))?;
@@ -414,10 +419,12 @@ fn apply_profile(s: &mut Session, p: &Value) -> Result<Value> {
 fn check_source(s: &Session, job: &solidcraft_doc::cam::machining::OdJob, inner: bool) -> Result<()> {
     let Some(saved) = &job.model_source else { return Ok(()) };
     let (source, points) = extract(s, &saved.body, saved.reverse, inner)?;
-    if points.len() != job.profile.len()
+    let points = solidcraft_doc::cam::drawing::simplified(&points);
+    let saved_points = solidcraft_doc::cam::drawing::simplified(&job.profile);
+    if points.len() != saved_points.len()
         || (source.approximation_mm - saved.approximation_mm).abs() > 1e-9
         || source.origin.iter().chain(&source.axis).zip(saved.origin.iter().chain(&saved.axis)).any(|(a, b)| (a - b).abs() > 1e-6)
-        || points.iter().zip(&job.profile).any(|(a, b)| (a.z_mm - b.z_mm).abs() > 1e-6 || (a.diameter_mm - b.diameter_mm).abs() > 1e-6)
+        || points.iter().zip(&saved_points).any(|(a, b)| (a.z_mm - b.z_mm).abs() > 1e-6 || (a.diameter_mm - b.diameter_mm).abs() > 1e-6)
     {
         return Err(bad("cam.turning.toolpath", "model/profile changed since import; read and apply the model profile again"));
     }
@@ -425,6 +432,9 @@ fn check_source(s: &Session, job: &solidcraft_doc::cam::machining::OdJob, inner:
 }
 
 fn validate_sources(s: &Session, setup: &solidcraft_doc::cam::Setup) -> Result<()> {
+    if setup.drawing.as_ref().is_some_and(|d| d.segments.iter().any(|s| s.thread_pitch_mm.is_some())) {
+        return Err(bad("cam.turning.toolpath", "ねじ指定があります。ねじの工具経路は未対応です。円筒としてのNC出力を停止しました"));
+    }
     if setup.previous_setup.is_some() {
         return Err(bad("cam.turning.toolpath", "regrip stock transfer is not supported; use an independent setup with explicit stock"));
     }
@@ -441,6 +451,38 @@ fn validate_sources(s: &Session, setup: &solidcraft_doc::cam::Setup) -> Result<(
         return Err(bad("cam.turning.toolpath", "OD and ID must use the same model, axis and front face"));
     }
     Ok(())
+}
+
+fn apply_section(s: &mut Session, req: &ApplyProfile) -> Result<Value> {
+    use solidcraft_doc::cam::{
+        drawing::Drawing,
+        machining::{OdJob, ProfilePoint},
+    };
+    let cmd = "cam.turning.profile.apply";
+    let (source, outer) = extract(s, &req.body, req.reverse, false)?;
+    let world = s.world_state();
+    let body = world.body(&req.body).ok_or_else(|| bad(cmd, "model no longer exists"))?;
+    let inner = solidcraft_kernel::turning_section_inner_outline(&body.body, req.reverse).map_err(|e| bad(cmd, e.to_string()))?;
+    let inner: Vec<_> = inner.points.into_iter().map(|(z_mm, diameter_mm)| ProfilePoint { z_mm, diameter_mm }).collect();
+    let mut plan = s.doc.turning.as_deref().cloned().ok_or_else(|| bad(cmd, "create a turning plan first"))?;
+    let setup = plan.setups.iter_mut().find(|v| v.id == req.setup).ok_or_else(|| bad(cmd, "setup not found"))?;
+    let mut od = setup.od_job.clone().unwrap_or_else(OdJob::default);
+    od.profile = outer.clone();
+    od.model_source = Some(source.clone());
+    // Do not invent through-bore toolpaths for solid or blind regions.
+    setup.id_job = if inner.iter().all(|p| p.diameter_mm > 1e-6) {
+        let mut id = setup.id_job.clone().unwrap_or_else(|| od.clone());
+        id.profile = inner.clone();
+        id.model_source = Some(source);
+        Some(id)
+    } else {
+        None
+    };
+    setup.od_job = Some(od);
+    setup.drawing = Some(Drawing::new(&outer, inner));
+    setup.cut_end_z_mm = None;
+    // Existing contour snapshots deliberately remain stale after a direction/model change.
+    set(s, &json!({"plan":plan}))
 }
 fn calculate(s: &Session, setup_id: &str) -> Result<solidcraft_doc::cam::machining::Toolpath> {
     let setup = s
@@ -477,6 +519,9 @@ fn nc(s: &mut Session, p: &Value) -> Result<Value> {
     let path = calculate(s, &req.setup)?;
     let setup =
         s.doc.turning.as_ref().and_then(|p| p.setups.iter().find(|t| t.id == req.setup)).ok_or_else(|| bad("cam.turning.nc", "setup not found"))?;
+    if setup.ending != solidcraft_doc::cam::drawing::Ending::Clamped {
+        return Err(bad("cam.turning.nc", "裏返し・突っ切りの終了方針が指定されていますが、その経路は未対応です。完了したNCとして出力できません"));
+    }
     let text = if let Some(post) = &setup.post {
         solidcraft_doc::cam::post::review_nc(setup, post)
     } else {
@@ -1154,5 +1199,57 @@ mod tests {
         assert_eq!(nc["machine_ready"], false);
         s.execute("edit.undo", &json!({})).unwrap();
         assert!(s.execute("cam.turning.nc", &json!({"setup":"setup-1","expected_revision":revision})).is_err());
+    }
+    #[test]
+    fn complete_section_is_atomic_linked_and_preserves_process_intent() {
+        use solidcraft_doc::cam::{drawing::Ending, machining::ProfilePoint};
+        let mut s = Session::default();
+        let script: Value = serde_json::from_str(include_str!("../../../../examples/turning-toolpath.json")).unwrap();
+        for c in script["commands"].as_array().unwrap() {
+            s.execute(c["command"].as_str().unwrap(), &c["params"]).unwrap();
+        }
+        let before = s.doc.turning.clone();
+        let revision = s.revision;
+        s.execute("cam.turning.profile.apply", &json!({"body":"段付き軸","setup":"setup-1","all":true,"expected_revision":revision})).unwrap();
+        let setup = &s.doc.turning.as_ref().unwrap().setups[0];
+        let drawing = setup.drawing.as_ref().unwrap();
+        assert!(drawing.inner.iter().all(|p| p.diameter_mm == 0.));
+        assert_eq!(drawing.segments.first().unwrap().a, drawing.segments.last().unwrap().b);
+        assert!(drawing.segments.windows(2).all(|p| p[0].b == p[1].a));
+        assert_eq!(setup.operations, before.as_ref().unwrap().setups[0].operations);
+        assert_eq!(setup.stock, before.as_ref().unwrap().setups[0].stock);
+        let good = s.doc.turning.clone();
+        assert!(
+            s.execute("cam.turning.profile.apply", &json!({"body":"missing","setup":"setup-1","all":true,"expected_revision":s.revision})).is_err()
+        );
+        assert_eq!(s.doc.turning, good);
+        assert!(
+            s.execute("cam.turning.profile.apply", &json!({"body":"段付き軸","setup":"setup-1","all":true,"expected_revision":revision})).is_err()
+        );
+        let mut plan = s.doc.turning.as_deref().unwrap().clone();
+        let job = plan.setups[0].od_job.as_mut().unwrap();
+        let (a, b) = (job.profile[0], job.profile[1]);
+        job.profile.insert(1, ProfilePoint { z_mm: (a.z_mm + b.z_mm) * 0.5, diameter_mm: (a.diameter_mm + b.diameter_mm) * 0.5 });
+        s.execute("cam.turning.set", &json!({"plan":plan})).unwrap();
+        s.execute("cam.turning.toolpath", &json!({"setup":"setup-1"})).unwrap();
+        let mut invalid = plan.clone();
+        let mut backtrack = plan.setups[0].od_job.as_ref().unwrap().clone();
+        backtrack.profile.insert(1, ProfilePoint { diameter_mm: a.diameter_mm + 2., ..a });
+        backtrack.profile.insert(2, a);
+        assert!(check_source(&s, &backtrack, false).is_err());
+        invalid.setups[0].od_job.as_mut().unwrap().profile[1].diameter_mm += 0.2;
+        s.execute("cam.turning.set", &json!({"plan":invalid})).unwrap();
+        assert!(s.execute("cam.turning.toolpath", &json!({"setup":"setup-1"})).is_err());
+        s.execute("edit.undo", &json!({})).unwrap();
+        plan.setups[0].drawing.as_mut().unwrap().segments[0].thread_pitch_mm = Some(1.5);
+        s.execute("cam.turning.set", &json!({"plan":plan})).unwrap();
+        assert!(s.execute("cam.turning.nc", &json!({"setup":"setup-1","expected_revision":s.revision})).is_err());
+        plan.setups[0].drawing.as_mut().unwrap().segments[0].thread_pitch_mm = None;
+        for ending in [Ending::Reverse, Ending::PartOff, Ending::PartingFinish] {
+            plan.setups[0].ending = ending;
+            s.execute("cam.turning.set", &json!({"plan":plan})).unwrap();
+            assert!(s.execute("cam.turning.nc", &json!({"setup":"setup-1","expected_revision":s.revision})).is_err());
+        }
+        assert_eq!(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap().turning, s.doc.turning);
     }
 }

@@ -1,6 +1,21 @@
 use super::*;
 use crate::scenario::Harness;
 
+#[test]
+fn flat_stock_display_keeps_removed_grooves_and_radial_gaps() {
+    use cam::simulation::Slab;
+    let bands = flat::joined_bands(vec![
+        Slab { z0: -3., z1: -2., inner: 2., outer: 5. },
+        Slab { z0: -2., z1: -1., inner: 2., outer: 5. },
+        Slab { z0: 0., z1: 1., inner: 2., outer: 5. },
+        Slab { z0: -3., z1: -2., inner: 7., outer: 9. },
+        Slab { z0: -2., z1: -1., inner: 7., outer: 9. },
+    ]);
+    assert_eq!(bands.len(), 3);
+    assert!(bands.iter().all(|s| s.z1 <= -1. || s.z0 >= 0.));
+    assert!(bands.iter().all(|s| s.outer <= 5. || s.inner >= 7.));
+}
+
 fn click(h: &mut Harness, handle: &str) {
     h.frames(2);
     if let Some(rect) = crate::scenario::rect_of(handle) {
@@ -10,6 +25,78 @@ fn click(h: &mut Harness, handle: &str) {
         h.step(&json!({"click":{"handle":handle}})).unwrap();
     }
     h.frames(2);
+}
+
+fn edit_tool(h: &mut Harness, station: u8) {
+    click(h, "cam_step_2");
+    h.frames(2);
+    let at = crate::scenario::rect_of(&format!("cam_tool_{station}")).unwrap().center();
+    h.step(&json!({"click":[at.x,at.y],"double":true})).unwrap();
+    h.frames(2);
+    assert_eq!(h.app.turning_workspace.tool_editor, Some(station));
+}
+
+#[test]
+fn staged_flat_workflow_edits_lines_tools_and_resets_without_losing_tools() {
+    let mut h = Harness::new();
+    h.call("ui.resize", json!({"width":1600,"height":1200}));
+    let script: serde_json::Value = serde_json::from_str(include_str!("../../../../examples/turning-toolpath.json")).unwrap();
+    for c in script["commands"].as_array().unwrap() {
+        h.app.run(c["command"].as_str().unwrap(), c["params"].clone()).unwrap();
+    }
+    h.app.home.open = false;
+    h.frames(3);
+    let camera = h.app.cam;
+    enter(&mut h.app, "turning").unwrap();
+    click(&mut h, "cam_model_read");
+    assert!(crate::scenario::rect_of("cam_tool_12").is_none());
+    assert!(crate::scenario::rect_of("cam_operation_0").is_none());
+    assert!(crate::scenario::rect_of("cam_flat_canvas").is_some());
+    assert_eq!(h.app.cam, camera, "CAM navigation must not change the design camera");
+    let old = h.app.session.doc.turning.as_ref().unwrap().setups[0].od_job.as_ref().unwrap().profile.len();
+    h.step(&json!({"click":{"handle":"cam_segment_0"},"double":true})).unwrap();
+    h.frames(2);
+    assert_eq!(h.app.turning_workspace.segment_editor, Some(0));
+    let canvas = crate::scenario::rect_of("cam_flat_canvas").unwrap();
+    for (name, at) in crate::scenario::handles("cam_segment_") {
+        if name.strip_prefix("cam_segment_").and_then(|s| s.parse::<usize>().ok()).is_some() {
+            assert!(canvas.contains(at), "opening the line editor must keep {name} visible");
+        }
+    }
+    click(&mut h, "cam_segment_split");
+    assert_eq!(h.app.session.doc.turning.as_ref().unwrap().setups[0].od_job.as_ref().unwrap().profile.len(), old + 1);
+    h.app.run("cam.turning.toolpath", json!({"setup":"setup-1"})).unwrap();
+    for _ in 0..2 {
+        click(&mut h, "cam_model_reverse");
+        assert!(h.app.session.doc.turning.as_ref().unwrap().setups[0].od_job.as_ref().unwrap().model_source.as_ref().unwrap().reverse);
+        h.app.run("edit.undo", json!({})).unwrap();
+        h.frames(3);
+        assert!(!h.app.session.doc.turning.as_ref().unwrap().setups[0].od_job.as_ref().unwrap().model_source.as_ref().unwrap().reverse);
+    }
+    click(&mut h, "cam_step_0");
+    assert!(crate::scenario::rect_of("cam_tool_12").is_none());
+    assert!(crate::scenario::rect_of("cam_operation_0").is_none());
+    edit_tool(&mut h, 12);
+    assert!(crate::scenario::rect_of("cam_tool_edit_close").is_some());
+    let canvas = crate::scenario::rect_of("cam_flat_canvas").unwrap();
+    let editor = crate::scenario::rect_of("cam_tool_edit_close").unwrap();
+    assert!(canvas.right() <= editor.left(), "tool controls must not expand underneath the 2D canvas");
+    click(&mut h, "cam_step_4");
+    click(&mut h, "cam_sim_calculate");
+    assert!(simulation_ui::current(&h.app).is_some());
+    assert!(h.widget("O9001 (SOLIDCRAFT REVIEW ONLY)").is_some());
+    assert!(crate::scenario::rect_of("cam_tool_12").is_none());
+    assert!(crate::scenario::rect_of("cam_operation_0").is_some());
+    let before = h.app.session.doc.turning.clone();
+    click(&mut h, "cam_reset");
+    assert_eq!(h.app.turning_workspace.workflow, 1);
+    assert!(h.app.turning_workspace.machining.preview.is_none());
+    let plan = h.app.session.doc.turning.as_ref().unwrap();
+    assert!(plan.setups[0].operations.is_empty() && plan.setups[0].od_job.is_none() && plan.setups[0].stock.is_none());
+    assert_eq!(plan.setups[0].turret, before.as_ref().unwrap().setups[0].turret);
+    h.app.run("edit.undo", json!({})).unwrap();
+    h.frames(3);
+    assert_eq!(h.app.session.doc.turning, before);
 }
 
 fn start() -> Harness {
@@ -72,8 +159,10 @@ fn turning_tool_contour_preview_then_explicit_add() {
     plan.setups[0].operations.clear();
     h.app.run("cam.turning.set", json!({"plan":plan})).unwrap();
     enter(&mut h.app, "turning").unwrap();
+    click(&mut h, "cam_step_2");
     click(&mut h, "cam_tool_12");
     click(&mut h, "cam_select_all");
+    assert!(h.app.turning_workspace.selection.difference.is_none(), "tool/range selection must not run a residual calculation");
     let before = h.app.session.doc.turning.clone();
     click(&mut h, "cam_selection_preview");
     assert!(h.app.turning_workspace.selection.preview.is_some(), "{:?}", h.app.turning_workspace.selection);
@@ -114,7 +203,7 @@ fn turning_material_candidates_apply_explicitly_and_insert_preset_is_persistent(
     assert_eq!(after.radial_stock_to_leave_mm, before.radial_stock_to_leave_mm);
     h.app.run("edit.undo", json!({})).unwrap();
     assert_eq!(h.app.session.doc.turning.as_ref().unwrap().setups[0].od_job, Some(before));
-    click(&mut h, "cam_step_4");
+    edit_tool(&mut h, 12);
     click(&mut h, "cam_insert_all");
     let plan = h.app.session.doc.turning.as_ref().unwrap();
     let tool = plan.setups[0].turret[11].simulation.as_ref().unwrap();
@@ -122,12 +211,13 @@ fn turning_material_candidates_apply_explicitly_and_insert_preset_is_persistent(
     assert!(tool.insert.is_some() && !tool.holder_verified);
     let roundtrip = solidcraft_engine::doc::Document::from_json(&h.app.session.doc.to_json()).unwrap();
     assert_eq!(roundtrip.turning, h.app.session.doc.turning);
+    click(&mut h, "cam_step_4");
     click(&mut h, "cam_sim_calculate");
     assert_eq!(simulation_ui::current(&h.app).unwrap().insert_stations, vec![6, 12]);
 }
 
 #[test]
-fn fifth_step_simulates_stock_without_silently_certifying_unknown_holders() {
+fn review_step_simulates_stock_without_silently_certifying_unknown_holders() {
     let mut h = Harness::new();
     let script: serde_json::Value = serde_json::from_str(include_str!("../../../../examples/turning-toolpath.json")).unwrap();
     for c in script["commands"].as_array().unwrap() {
@@ -155,10 +245,11 @@ fn fifth_step_simulates_stock_without_silently_certifying_unknown_holders() {
     click(&mut h, "cam_sim_calculate");
     assert!(simulation_ui::current(&h.app).unwrap().checked_stations.is_empty());
     let revision = h.app.session.revision;
+    edit_tool(&mut h, 12);
     click(&mut h, "cam_sim_tool_settings");
     assert_eq!(h.app.session.revision, revision, "opening unknown holder dimensions must be read-only");
+    click(&mut h, "cam_step_4");
     assert!(simulation_ui::current(&h.app).is_some());
-    click(&mut h, "cam_sim_tool_settings");
     // Synthetic envelope deliberately intersects stock; replay must stop and focus it.
     let mut plan = h.app.session.doc.turning.as_deref().unwrap().clone();
     let tool = plan.setups[0].turret[11].simulation.as_mut().unwrap();
@@ -174,8 +265,8 @@ fn fifth_step_simulates_stock_without_silently_certifying_unknown_holders() {
     assert_eq!(h.app.turning_workspace.machining.step, first);
     click(&mut h, "cam_sim_contact_0");
     assert_eq!(h.app.turning_workspace.simulation.focus_contact, Some(0));
-    click(&mut h, "cam_sim_back");
-    assert_eq!(h.app.turning_workspace.workflow, 3);
+    click(&mut h, "cam_review_edit");
+    assert_eq!(h.app.turning_workspace.workflow, 2);
 }
 
 #[test]
@@ -233,6 +324,7 @@ fn turning_manual_separation_needs_bore_and_remains_last() {
 fn turning_operation_composer_is_read_only_until_confirm_and_keeps_rough_before_finish() {
     let mut h = start();
     h.app.turning_workspace.advanced = false;
+    click(&mut h, "cam_step_2");
     let revision = h.app.session.revision;
     choose_operation(&mut h, OperationKind::OdFinish);
     assert_eq!(h.app.session.revision, revision);
@@ -323,7 +415,7 @@ fn turning_workspace_menu_works_in_english_and_japanese() {
         assert!(active(&h.app));
         click(&mut h, "cam_create_plan");
         assert!(h.app.session.doc.turning.is_some());
-        assert!(h.widget(crate::i18n::Locale::for_language(language).text("cam.guide_review")).is_some());
+        assert!(h.widget("④ シミュレーション・NC").is_some());
     }
 }
 
@@ -359,13 +451,12 @@ fn turning_path_preview_export_and_revision_invalidation_use_real_buttons() {
     }
     h.app.home.open = false;
     enter(&mut h.app, "turning").unwrap();
-    click(&mut h, "cam_step_3");
-    click(&mut h, "cam_path_calculate");
+    click(&mut h, "cam_step_4");
+    click(&mut h, "cam_sim_calculate");
     assert!(h.app.turning_workspace.machining.preview.is_some());
     assert!(machining_ui::active(&h.app));
     click(&mut h, "cam_path_nc_view");
     assert!(h.widget("O9001 (SOLIDCRAFT REVIEW ONLY)").is_some());
-    click(&mut h, "cam_path_back_paths");
     click(&mut h, "cam_path_export");
     h.frames(4);
     let nc = std::fs::read_to_string(h.dir.join("turning-review.nc")).unwrap();
@@ -378,14 +469,14 @@ fn turning_path_preview_export_and_revision_invalidation_use_real_buttons() {
     h.frames(3);
     assert!(h.app.session.revision > old_revision);
     assert!(h.widget("Preview is out of date").is_some());
-    click(&mut h, "cam_path_calculate");
+    click(&mut h, "cam_sim_calculate");
     let preview = h.app.turning_workspace.machining.preview.as_ref().unwrap();
     assert_eq!(preview.0, h.app.session.revision);
     assert_eq!(preview.2.job.radial_stock_to_leave_mm, 0.4);
 }
 
 #[test]
-fn turning_nl_output_format_is_saved_and_applies_to_export_from_the_fifth_step() {
+fn turning_nl_output_format_is_saved_and_applies_to_export_from_the_review_step() {
     let mut h = Harness::new();
     let script: serde_json::Value = serde_json::from_str(include_str!("../../../../examples/turning-toolpath.json")).unwrap();
     for c in script["commands"].as_array().unwrap() {
@@ -393,14 +484,14 @@ fn turning_nl_output_format_is_saved_and_applies_to_export_from_the_fifth_step()
     }
     h.app.home.open = false;
     enter(&mut h.app, "turning").unwrap();
-    click(&mut h, "cam_step_3");
+    click(&mut h, "cam_step_4");
+    click(&mut h, "cam_nc_settings");
     click(&mut h, "cam_post_format");
     click(&mut h, "cam_post_nl");
     assert!(h.app.session.doc.turning.as_ref().unwrap().setups[0].post.is_some());
-    click(&mut h, "cam_path_calculate");
+    click(&mut h, "cam_sim_calculate");
     click(&mut h, "cam_path_nc_view");
     assert!(h.widget("O9001 (SOLIDCRAFT NL SAMPLE REVIEW)").is_some());
-    click(&mut h, "cam_path_back_paths");
     click(&mut h, "cam_path_export");
     h.frames(4);
     let nc = std::fs::read_to_string(h.dir.join("turning-review.nc")).unwrap();
@@ -423,14 +514,13 @@ fn turning_model_profile_buttons_fill_an_empty_profile_and_calculate() {
     click(&mut h, "cam_step_1");
     let revision = h.app.session.revision;
     click(&mut h, "cam_model_read");
-    assert_eq!(h.app.session.revision, revision, "preview must not mutate the plan");
-    click(&mut h, "cam_model_apply");
+    assert!(h.app.session.revision > revision, "combined extraction is one undoable edit");
     let job = h.app.session.doc.turning.as_ref().unwrap().setups[0].od_job.as_ref().unwrap();
     assert_eq!(job.profile.len(), 6);
     assert_eq!(job.model_source.as_ref().unwrap().body, "段付き軸");
     assert_eq!(job.radial_stock_to_leave_mm, 0.1);
-    click(&mut h, "cam_step_3");
-    click(&mut h, "cam_path_calculate");
+    click(&mut h, "cam_step_4");
+    click(&mut h, "cam_sim_calculate");
     assert!(h.app.turning_workspace.machining.preview.is_some());
     h.app.run("edit.undo", json!({})).unwrap();
     assert!(h.app.session.doc.turning.as_ref().unwrap().setups[0].od_job.as_ref().unwrap().profile.is_empty());
@@ -443,20 +533,24 @@ fn turning_model_profile_inner_buttons_apply_and_preview_both_paths() {
     for c in script["commands"].as_array().unwrap() {
         h.app.run(c["command"].as_str().unwrap(), c["params"].clone()).unwrap();
     }
+    h.app
+        .run("cam.turning.profile.apply", json!({"body":"段付き貫通穴","setup":"setup-1","inner":true,"expected_revision":h.app.session.revision}))
+        .unwrap();
     h.app.home.open = false;
     enter(&mut h.app, "turning").unwrap();
     click(&mut h, "cam_step_1");
-    click(&mut h, "cam_model_id");
     click(&mut h, "cam_model_read");
-    click(&mut h, "cam_model_apply");
     let setup = &h.app.session.doc.turning.as_ref().unwrap().setups[0];
     assert_eq!(setup.id_job.as_ref().unwrap().profile.len(), 5);
-    assert_eq!(setup.operations[2].station, Some(5));
-    click(&mut h, "cam_step_3");
-    click(&mut h, "cam_path_calculate");
+    assert!(setup.drawing.is_some());
+    // The new flow leaves operation creation to stage 3.
+    let revision = h.app.session.revision;
+    h.app.run("cam.turning.profile.apply", json!({"body":"段付き貫通穴","setup":"setup-1","inner":true,"expected_revision":revision})).unwrap();
+    click(&mut h, "cam_step_4");
+    click(&mut h, "cam_sim_calculate");
     assert!(h.app.turning_workspace.machining.preview.as_ref().unwrap().2.id_path.is_some());
     click(&mut h, "cam_path_nc_view");
-    assert!(h.widget("View G-code").is_some());
+    assert!(h.widget("Gコード").is_some());
 }
 
 #[test]
@@ -469,7 +563,7 @@ fn turning_catalogue_selection_preview_and_registration_use_real_buttons() {
     }
     h.app.home.open = false;
     enter(&mut h.app, "turning").unwrap();
-    click(&mut h, "cam_step_4");
+    edit_tool(&mut h, 12);
     let revision = h.app.session.revision;
     click(&mut h, "cam_catalog_open");
     click(&mut h, "cam_catalog_search");
@@ -493,6 +587,7 @@ fn turning_catalogue_selection_preview_and_registration_use_real_buttons() {
     assert!(!slot.simulation.as_ref().unwrap().holder_verified);
     click(&mut h, "cam_catalog_station");
     click(&mut h, "cam_catalog_station_5");
+    assert_eq!(h.app.turning_workspace.tool_editor, Some(5));
     assert!(h.app.turning_workspace.catalog.insert.is_none());
     assert!(h.app.turning_workspace.catalog.holder.is_none());
     assert!(catalog_ui::preview(&h.app).is_none());
@@ -516,7 +611,7 @@ fn turning_holder_cad_buttons_import_preview_and_remove() {
     let mut source = solidcraft_engine::Session::default();
     source.execute("solid.box", &json!({"length":25,"width":25,"height":150})).unwrap();
     source.execute("file.export", &json!({"path":path})).unwrap();
-    click(&mut h, "cam_step_4");
+    edit_tool(&mut h, 12);
     click(&mut h, "cam_catalog_open");
     click(&mut h, "cam_holder_cad_path");
     h.step(&json!({"text":path.to_string_lossy()})).unwrap();
@@ -547,7 +642,7 @@ fn turning_custom_insert_registration_and_step_preview_buttons() {
     let mut source = solidcraft_engine::Session::default();
     source.execute("solid.box", &json!({"length":8,"width":6,"height":2})).unwrap();
     source.execute("file.export", &json!({"path":path})).unwrap();
-    click(&mut h, "cam_step_4");
+    edit_tool(&mut h, 12);
     click(&mut h, "cam_catalog_open");
     click(&mut h, "cam_custom_open");
     click(&mut h, "cam_custom_insert");
@@ -588,7 +683,7 @@ fn turning_library_previews_unmounted_step_without_assigning_a_station() {
         .run("cam.turning.tool_cad.import", json!({"kind":"holder","model":"WTJNR2525M-16N","path":path,"expected_revision":h.app.session.revision}))
         .unwrap();
     let revision = h.app.session.revision;
-    click(&mut h, "cam_step_4");
+    edit_tool(&mut h, 12);
     click(&mut h, "cam_catalog_open");
     click(&mut h, "cam_catalog_holder");
     let index = cam::catalog::HOLDERS.iter().position(|v| v.model == "WTJNR2525M-16N").unwrap();

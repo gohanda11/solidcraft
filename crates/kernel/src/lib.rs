@@ -222,7 +222,7 @@ pub use sweep_path::{RailFit, SweepControl, SweepOrientation, sweep_path, sweep_
 pub use topo::{CylinderFace, cylinder_end_at, cylinder_face, cylinder_face_at};
 pub use topo::{TopoCounts, merged_topology, seam_flags};
 pub use tspline::tspline_sheet;
-pub use turning::{TurningOutline, turning_inner_outline, turning_outline};
+pub use turning::{TurningOutline, turning_inner_outline, turning_outline, turning_section_inner_outline};
 pub use whole_face::{WholeFace, cut_takes_only_the_face, cut_tool, face_prism, matching_face};
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]

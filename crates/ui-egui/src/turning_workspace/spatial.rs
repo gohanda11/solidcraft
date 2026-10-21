@@ -149,6 +149,10 @@ fn button(ui: &mut egui::Ui, id: &str, key: &str, selected: bool) -> bool {
 }
 
 pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
+    if (!app.turning_workspace.advanced || app.turning_workspace.spatial.two_d) && super::catalog_ui::preview(app).is_none() {
+        super::flat::show(app, ui);
+        return;
+    }
     if super::catalog_ui::preview(app).is_some() {
         super::catalog_ui::canvas(app, ui);
         return;
@@ -288,7 +292,7 @@ fn range_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     }
 }
 
-fn playback(app: &mut SolveApp, ui: &mut egui::Ui) {
+pub(super) fn playback(app: &mut SolveApp, ui: &mut egui::Ui) {
     let count = path(app).map_or(0, |p| p.moves.len());
     let state = &mut app.turning_workspace;
     ui.horizontal_wrapped(|ui| {
@@ -375,7 +379,7 @@ fn matches_operation(kind: OperationKind, phase: Phase) -> bool {
     )
 }
 
-fn simulation_pose(app: &SolveApp) -> Option<(ProfilePoint, Option<u8>, bool)> {
+pub(super) fn simulation_pose(app: &SolveApp) -> Option<(ProfilePoint, Option<u8>, bool)> {
     let report = super::simulation_ui::current(app)?;
     let state = &app.turning_workspace;
     if let Some(index) = state.simulation.focus_contact
@@ -982,9 +986,12 @@ mod tests {
         }
         h.app.home.open = false;
         super::super::enter(&mut h.app, "turning").unwrap();
-        click_button(&mut h, "cam_step_3");
+        h.app.turning_workspace.advanced = true;
+        h.app.turning_workspace.workflow = 3;
+        h.app.turning_workspace.section = 3;
+        h.frames(2);
         click_button(&mut h, "cam_path_calculate");
-        assert!(!h.app.turning_workspace.spatial.two_d);
+        h.app.turning_workspace.spatial.two_d = false;
         click_button(&mut h, "cam_half_section");
         assert!(section_plane(&h.app).is_some());
         assert!(h.app.session.section.is_none());
@@ -998,6 +1005,9 @@ mod tests {
         assert!(h.widget("O9001 (SOLIDCRAFT REVIEW ONLY)").is_some());
         click_button(&mut h, "cam_path_back_paths");
         click_button(&mut h, "cam_step_1");
+        h.app.turning_workspace.advanced = true;
+        h.app.turning_workspace.spatial.two_d = false;
+        h.frames(2);
         click_button(&mut h, "cam_pick_end");
         let (source, points) = profile(&h.app).unwrap();
         let point = points.iter().find(|p| p.z_mm < -0.001 && p.z_mm > -59.).copied().unwrap();
@@ -1008,7 +1018,11 @@ mod tests {
         assert!(path(&h.app).is_none());
         h.app.turning_workspace.spatial.stage = 1;
         assert!(stage_scene(&h.app).is_none(), "stale rough shape must disappear");
-        click_button(&mut h, "cam_step_3");
+        h.app.turning_workspace.advanced = true;
+        h.app.turning_workspace.workflow = 3;
+        h.app.turning_workspace.section = 3;
+        h.app.turning_workspace.spatial.two_d = false;
+        h.frames(2);
         click_button(&mut h, "cam_path_calculate");
         let path = path(&h.app).unwrap();
         assert_eq!(path.job.profile.last().unwrap().z_mm, point.z_mm);

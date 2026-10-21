@@ -8,6 +8,7 @@ use crate::{SolveApp, i18n::tr, theme::Tokens, ui_kit};
 mod catalog_ui;
 mod conditions_ui;
 mod controls;
+mod flat;
 mod guided;
 pub mod machining_ui;
 mod model_profile;
@@ -16,6 +17,7 @@ mod post_ui;
 mod selection_ui;
 mod simulation_ui;
 pub mod spatial;
+mod workflow_ui;
 pub use guided::toolbar;
 
 #[derive(Clone, Debug)]
@@ -37,6 +39,11 @@ pub struct State {
     catalog: catalog_ui::View,
     operation_draft: Option<operations_ui::Draft>,
     selection: selection_ui::View,
+    tool_editor: Option<u8>,
+    segment_editor: Option<usize>,
+    flat: flat::View,
+    reset_requested: bool,
+    tool_click_frame: Option<u64>,
 }
 
 impl Default for State {
@@ -59,6 +66,11 @@ impl Default for State {
             catalog: catalog_ui::View::default(),
             operation_draft: None,
             selection: selection_ui::View::default(),
+            tool_editor: None,
+            segment_editor: None,
+            flat: flat::View::default(),
+            reset_requested: false,
+            tool_click_frame: None,
         }
     }
 }
@@ -77,7 +89,11 @@ pub fn enter(app: &mut SolveApp, workspace: &str) -> Result<(), String> {
                 return Err(tr("cam.finish_modelling").into());
             }
             crate::render_workspace::enter(app, false)?;
+            if app.session.doc.turning.is_none() && !app.session.world_state().bodies.is_empty() {
+                app.run("cam.turning.set", json!({"plan":TurningPlan::nl2500()}))?;
+            }
             app.ui.tab = "TURNING".into();
+            app.turning_workspace.spatial.two_d = true;
             Ok(())
         }
         _ => Err("workspace must be design, render or turning".into()),
@@ -211,6 +227,8 @@ fn outline(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut State) {
         let id = next_id(plan, "setup");
         let previous = plan.setups.last();
         plan.setups.push(Setup {
+            drawing: None,
+            ending: cam::drawing::Ending::default(),
             post: previous.and_then(|s| s.post.clone()).or_else(|| Some(cam::post::NlPost::default())),
             name: format!("{} {}", tr("cam.setup"), plan.setups.len() + 1),
             id,
@@ -419,59 +437,71 @@ pub fn panels(app: &mut SolveApp, ui: &mut egui::Ui) {
     let mut plan = original.as_deref().cloned();
     let bodies: Vec<String> = app.session.world_state().bodies.iter().map(|b| b.name.clone()).collect();
     let frame = egui::Frame::NONE.fill(Tokens::get().panel).inner_margin(12);
-    egui::Panel::left("sc_turning_outline").exact_size(260.0).resizable(false).frame(frame).show(ui, |ui| {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            if let Some(plan) = &mut plan {
-                state.setup = state.setup.min(plan.setups.len().saturating_sub(1));
-                if state.advanced {
-                    outline(ui, plan, &mut state);
+    if state.advanced {
+        egui::Panel::left("sc_turning_outline").exact_size(260.0).resizable(false).frame(frame).show(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                if let Some(plan) = &mut plan {
+                    state.setup = state.setup.min(plan.setups.len().saturating_sub(1));
+                    if state.advanced {
+                        outline(ui, plan, &mut state);
+                    } else {
+                        selection_ui::tools(ui, plan, &mut state);
+                    }
                 } else {
-                    selection_ui::tools(ui, plan, &mut state);
-                }
-            } else {
-                ui.heading(tr("cam.workspace"));
-                ui.label(tr("cam.start_help"));
-                let response = ui_kit::button(ui, tr("cam.create_plan"), ui_kit::Button::Normal);
-                crate::scenario::publish_rect("cam_create_plan", response.rect);
-                if response.clicked() {
-                    match app
-                        .run("cam.turning.defaults", json!({}))
-                        .and_then(|v| serde_json::from_value(v["plan"].clone()).map_err(|e| e.to_string()))
-                    {
-                        Ok(template) => {
-                            state.workflow = 1;
-                            plan = Some(template);
+                    ui.heading(tr("cam.workspace"));
+                    ui.label(tr("cam.start_help"));
+                    let response = ui_kit::button(ui, tr("cam.create_plan"), ui_kit::Button::Normal);
+                    crate::scenario::publish_rect("cam_create_plan", response.rect);
+                    if response.clicked() {
+                        match app
+                            .run("cam.turning.defaults", json!({}))
+                            .and_then(|v| serde_json::from_value(v["plan"].clone()).map_err(|e| e.to_string()))
+                        {
+                            Ok(template) => {
+                                state.workflow = 1;
+                                plan = Some(template);
+                            }
+                            Err(e) => state.error = Some(e),
                         }
-                        Err(e) => state.error = Some(e),
                     }
-                }
-            }
-        });
-    });
-    if let Some(plan) = &mut plan {
-        egui::Panel::right("sc_turning_inspector").exact_size(350.0).resizable(false).frame(frame).show(ui, |ui| {
-            egui::ScrollArea::vertical().id_salt((state.advanced, state.workflow, state.section, state.operation_draft.is_some())).show(ui, |ui| {
-                if !state.advanced {
-                    selection_ui::operations(ui, plan, &mut state);
-                }
-                if state.operation_draft.is_some() {
-                    operations_ui::composer(ui, plan, &mut state);
-                } else if state.advanced {
-                    if ui_kit::button(ui, tr("cam.guide_return"), ui_kit::Button::Normal).clicked() {
-                        state.advanced = false;
-                    }
-                    inspector(ui, plan, &mut state, app.session.revision);
-                } else if state.workflow == 2 && state.selection.editing {
-                    selection_ui::settings(ui, plan, &mut state, app.session.revision);
-                } else {
-                    guided::settings(ui, plan, &mut state, app.session.revision, &bodies);
-                }
-                if let Some(error) = &state.error {
-                    ui.separator();
-                    ui.label(error);
                 }
             });
         });
+        if let Some(plan) = &mut plan {
+            egui::Panel::right("sc_turning_inspector").exact_size(350.0).resizable(false).frame(frame).show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt((state.advanced, state.workflow, state.section, state.operation_draft.is_some())).show(
+                    ui,
+                    |ui| {
+                        if !state.advanced {
+                            selection_ui::operations(ui, plan, &mut state);
+                        }
+                        if state.operation_draft.is_some() {
+                            operations_ui::composer(ui, plan, &mut state);
+                        } else if state.advanced {
+                            if ui_kit::button(ui, tr("cam.guide_return"), ui_kit::Button::Normal).clicked() {
+                                state.advanced = false;
+                            }
+                            inspector(ui, plan, &mut state, app.session.revision);
+                        } else if state.workflow == 2 && state.selection.editing {
+                            selection_ui::settings(ui, plan, &mut state, app.session.revision);
+                        } else {
+                            guided::settings(ui, plan, &mut state, app.session.revision, &bodies);
+                        }
+                        if let Some(error) = &state.error {
+                            ui.separator();
+                            ui.label(error);
+                        }
+                    },
+                );
+            });
+        }
+    } else {
+        workflow_ui::panels(ui, &mut plan, &mut state, app.session.revision, &bodies);
+    }
+    if state.reset_requested
+        && let Some(plan) = &mut plan
+    {
+        workflow_ui::reset(plan, &mut state);
     }
     if plan.as_ref() != original.as_deref() {
         match app.run("cam.turning.set", json!({"plan": plan})) {
@@ -485,6 +515,7 @@ pub fn panels(app: &mut SolveApp, ui: &mut egui::Ui) {
     machining_ui::process(app, &mut state.machining);
     model_profile::process(app, &mut state.model_profile);
     simulation_ui::process(app, &mut state);
+    machining_ui::process(app, &mut state.machining);
     catalog_ui::process(app, &mut state);
     selection_ui::process(app, &mut state);
     let fit = std::mem::take(&mut state.catalog.fit);

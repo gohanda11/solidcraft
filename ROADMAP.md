@@ -1,5 +1,7 @@
 # SolidCraft roadmap
 
+- 旋削CAM：2Dの「輪郭→材料→工程→シミュレーション・NC」に統合。段階別パネル、工具／線のダブルクリック編集、閉断面の自動抽出と反転、線の分割、公差・ねじ注記、Undo可能なリセットを追加。ねじ・裏返し・突っ切りの未対応経路はNC出力を拒否。
+
 ## Local turning CAM extension (2026-10-16)
 
 2026-10-21: independent decoding of exported review NC checks stepped OD/ID,

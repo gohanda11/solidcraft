@@ -5,6 +5,7 @@ use cam::machining::{OdJob, ProfilePoint};
 const STEPS: [&str; 5] = ["cam.guide_stock", "cam.guide_profile", "cam.guide_conditions", "cam.guide_review", "cam.guide_sim"];
 
 pub(super) fn go(state: &mut State, step: usize) {
+    let step = if step == 3 { 4 } else { step };
     state.operation_draft = None;
     if state.workflow != step.min(4) && state.catalog.preview.take().is_some() {
         state.catalog.fit = true;
@@ -12,8 +13,10 @@ pub(super) fn go(state: &mut State, step: usize) {
     state.workflow = step.min(4);
     state.advanced = false;
     state.spatial.playing = false;
+    state.tool_editor = None;
+    state.segment_editor = None;
+    state.spatial.two_d = true;
     if step == 4 {
-        state.spatial.two_d = false;
         state.machining.show_nc = false;
     }
     state.machining.show = step >= 3 && state.machining.preview.is_some();
@@ -36,12 +39,9 @@ fn button(ui: &mut egui::Ui, id: &str, label: &str, enabled: bool) -> bool {
 
 pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui, origin: egui::Pos2) {
     let available = (ui.max_rect().right() - origin.x - 16.0).max(320.0);
-    let width = (available / 5.0).min(172.0);
+    let width = (available / 4.0).min(220.0);
     for (position, (step, key)) in
-        [(1, "cam.guide_profile"), (0, "cam.guide_stock"), (2, "cam.guide_conditions"), (4, "cam.guide_sim"), (3, "cam.guide_review")]
-            .iter()
-            .copied()
-            .enumerate()
+        [(1, "① 輪郭・加工方向"), (0, "② 材料・削る部分"), (2, "③ 加工工程"), (4, "④ シミュレーション・NC")].iter().copied().enumerate()
     {
         let rect = egui::Rect::from_min_size(origin + egui::vec2(position as f32 * width, 0.0), egui::vec2(width - 6.0, 38.0));
         let selected = !app.turning_workspace.advanced && app.turning_workspace.workflow == step;
@@ -367,7 +367,7 @@ fn navigation(ui: &mut egui::Ui, state: &mut State, step: usize, issue: Option<&
                     1 => 0,
                     0 => 2,
                     2 => 4,
-                    _ => 3,
+                    _ => 4,
                 },
             );
         }
