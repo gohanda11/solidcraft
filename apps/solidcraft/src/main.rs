@@ -751,7 +751,11 @@ fn main() -> eframe::Result {
             });
             if let Some(rs) = &cc.wgpu_render_state {
                 let scene_samples = scene_samples(rs.adapter.get_info().backend, u32::from(samples), &rs.msaa_supported);
-                eprintln!("SolidCraft graphics: {:?}, MSAA {scene_samples}x (requested {}x)", rs.adapter.get_info().backend, samples);
+                let adapter = rs.adapter.get_info();
+                eprintln!(
+                    "SolidCraft graphics: {} ({:?}, {:?}), MSAA {}x (requested {}x)",
+                    adapter.name, adapter.backend, adapter.device_type, scene_samples, samples
+                );
                 solidcraft_engine::crash::phase("viewport pipelines (shader compile)");
                 app.set_wgpu_split(rs, depth_bits, STENCIL_BITS, scene_samples);
                 solidcraft_ui_egui::gpu::install_picture_renderer(rs);

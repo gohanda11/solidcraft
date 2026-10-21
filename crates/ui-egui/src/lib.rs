@@ -255,6 +255,7 @@ pub mod tool_modifiers;
 pub mod toolbar;
 pub mod toolbar_custom;
 pub mod tools;
+pub mod turning_workspace;
 pub mod ui_kit;
 #[cfg(test)]
 mod ui_kit_guard_tests;
@@ -395,6 +396,7 @@ pub struct SolveApp {
     saving: Option<save_job::Saving>,
     pub viewport: viewport::ViewportState,
     pub render_workspace: render_workspace::State,
+    pub turning_workspace: turning_workspace::State,
     pub tool: Option<tools::Tool>,
     pub dialog: Option<dialogs::Dialog>,
     /// The Change Parameters window, when open.
@@ -492,6 +494,9 @@ pub struct SolveApp {
     /// Build bodies' display meshes on the CPU even where the GPU could (safe mode). Read by
     /// [`SolveApp::set_wgpu`].
     pub cpu_meshing: bool,
+    /// Actual wgpu adapter, including software devices such as Windows WARP.
+    pub graphics_adapter: Option<String>,
+    pub software_renderer: bool,
     pub frame_ms: f64,
     /// The viewport's frame-rate readout ([`frame_rate`]).
     pub frame_rate: frame_rate::FrameRate,
@@ -564,6 +569,7 @@ impl SolveApp {
             saving: None,
             viewport: viewport::ViewportState::default(),
             render_workspace,
+            turning_workspace: turning_workspace::State::default(),
             tool: None,
             dialog: None,
             params: None,
@@ -614,6 +620,8 @@ impl SolveApp {
             integrated_titlebar: false,
             native_file_menu: false,
             cpu_meshing: false,
+            graphics_adapter: None,
+            software_renderer: false,
             frame_ms: 0.0,
             frame_rate: frame_rate::FrameRate::default(),
             synthetic: Vec::new(),
@@ -703,6 +711,8 @@ impl SolveApp {
         render_workspace::sync_backend(self);
         self.msaa_supported = rs.msaa_supported.clone();
         let info = rs.adapter.get_info();
+        self.graphics_adapter = Some(format!("{} ({:?})", info.name, info.backend));
+        self.software_renderer = info.device_type == egui_wgpu::wgpu::DeviceType::Cpu;
         self.help.gpu = Some(format!("{} ({:?}, {:?})", info.name.trim(), info.backend, info.device_type));
         self.viewport.adapter = format!("{:?} · {}", info.backend, info.name);
     }
@@ -903,6 +913,10 @@ impl SolveApp {
                 }
                 if matches!(id, "file.new" | "doc.open" | "doc.recover") {
                     render_workspace::reset_document(self);
+                    self.turning_workspace = turning_workspace::State::default();
+                    if turning_workspace::active(self) {
+                        self.ui.tab = "MODEL".into();
+                    }
                     dim_view::cancel();
                     self.menu.props = None;
                     sketch_attachment_ui::clear(self);
@@ -1777,11 +1791,14 @@ impl SolveApp {
                 return;
             }
         }
-        let floating = ui_kit::Container::new(ui.ctx(), ui_kit::Surface::Panel).floating();
-        let show_timeline = self.ui.show_timeline && !render_workspace::active(self);
+        let floating = ui_kit::Container::new(ui.ctx(), ui_kit::Surface::Panel).floating() && !turning_workspace::active(self);
+        let show_timeline = self.ui.show_timeline && !render_workspace::active(self) && !turning_workspace::active(self);
         let left_timeline = show_timeline && self.preferences.timeline_left;
         timeline_left::animate_folds(self, ui.ctx());
         if !floating {
+            self.shell.cards.clear();
+            self.shell.panels.clear();
+            self.shell.content = None;
             toolbar::toolbar(self, ui);
         }
         theme::TabAccent::publish(self, ui.ctx());
@@ -1792,7 +1809,7 @@ impl SolveApp {
             timeline::timeline(self, ui);
         }
         // Browser hugs its contents in either layout; it never becomes a full-height blank column.
-        if !self.ui.show_browser {
+        if !self.ui.show_browser || turning_workspace::active(self) {
             self.shell.browser = None;
         }
         if floating || left_timeline || !show_timeline {
@@ -1839,7 +1856,10 @@ impl SolveApp {
         if render_workspace::active(self) {
             render_workspace::panel(self, ui);
         }
-        if self.ui.show_browser {
+        if turning_workspace::active(self) {
+            turning_workspace::panels(self, ui);
+        }
+        if self.ui.show_browser && !turning_workspace::active(self) {
             browser::browser(self, ui);
         }
         if floating {
@@ -1886,7 +1906,9 @@ impl SolveApp {
     }
 
     fn show_workspace(&mut self, ui: &mut egui::Ui) {
-        if render_workspace::active(self) {
+        if turning_workspace::active(self) {
+            turning_workspace::spatial::show(self, ui);
+        } else if render_workspace::active(self) {
             render_workspace::show(self, ui);
         } else {
             viewport::show(self, ui);

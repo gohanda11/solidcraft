@@ -947,7 +947,7 @@ fn ribbon_tabs(app: &mut SolveApp, ui: &mut egui::Ui, row: Rect) {
     let search_width = crate::ui_kit::CommandSearch::closed_width(ui.ctx());
     // The first tab and the search field sit the same distance from the card's top, left and right
     // edges, so their outer corners are concentric with the card's corners.
-    let floating = Container::for_layout(app.ui.layout, Surface::Panel).floating();
+    let floating = Container::for_layout(app.ui.layout, Surface::Panel).floating() && !crate::turning_workspace::active(app);
     let inset = RIBBON_TAB_INSET;
     let corner = if floating { t.radius_lg.saturating_sub(inset as u8).max(t.radius_sm / 2) } else { t.control_radius.saturating_sub(1) };
     let search = Rect::from_min_size(pos2(row.right() - search_width - inset, row.top() + inset), vec2(search_width, TAB_ROW_HEIGHT - 2.0 * inset));
@@ -1029,7 +1029,7 @@ fn dropdown_arrow(painter: &egui::Painter, at: egui::Pos2, ink: Color32) {
 pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
     let t = Tokens::get();
     crate::workspace::sync_context(app);
-    let floating = Container::for_layout(app.ui.layout, Surface::Panel).floating();
+    let floating = Container::for_layout(app.ui.layout, Surface::Panel).floating() && !crate::turning_workspace::active(app);
     let labels = app.preferences.ribbon_labels;
     let button_height = if labels { BUTTON_HEIGHT } else { ICON_BUTTON_HEIGHT };
     let group_height = if labels { GROUP_HEIGHT } else { ICON_GROUP_HEIGHT };
@@ -1085,7 +1085,7 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
         ribbon_text(
             ui,
             pos2(ws.center().x, ws.top() + if labels { 69.0 } else { 50.0 }),
-            app.tr(if render { "ui.render" } else { "ui.design" }),
+            app.tr(if render { "ui.render" } else if crate::turning_workspace::active(app) { "cam.workspace" } else { "ui.design" }),
             t.font_button,
             t.text,
             true,
@@ -1114,6 +1114,9 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
         };
         let mut px = ribbon_left;
         let top = r.top() + TAB_ROW_HEIGHT;
+        if crate::turning_workspace::active(app) {
+            crate::turning_workspace::toolbar(app, ui, pos2(px + 8.0, top + 5.0));
+        }
         let mut drop: Option<(&'static str, &'static str, Option<&'static str>)> = None;
         let mut menu: Option<(egui::Pos2, &'static str)> = None;
         // A drop-down row's pin icon clicked: pin or unpin that command.

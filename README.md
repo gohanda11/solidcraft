@@ -4,6 +4,12 @@
 
 <h1 align="center">SolidCraft</h1>
 
+> **旋削 CAM 開発ブランチ** — [gohanda11/solidcraft](https://github.com/gohanda11/solidcraft)
+> で工具・輪郭選択、荒／仕上げ経路、切削シミュレーション、検討用 NC を開発しています。
+> [CAM の使い方と対応範囲](docs/turning-cam.md) · [本家更新・差分管理](docs/cam-fork-workflow.md)
+> 。`main` は本家の比較基準です。CAM は `cam/turning-foundation` を使用してください。
+> 以下の配布リンクは本家版であり、この CAM 実装は含まれません。
+
 <p align="center">
   <strong>An open-source parametric 3D CAD application built in pure Rust.</strong><br />
   Sketch, constrain, and build solids with a parametric feature timeline. Change a dimension

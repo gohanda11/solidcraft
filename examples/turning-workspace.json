@@ -1,0 +1,264 @@
+{
+  "commands": [
+    {
+      "command": "file.new",
+      "params": {
+        "name": "旋削CAM サンプル — 段付き中空軸"
+      }
+    },
+    {
+      "command": "sketch.create",
+      "params": {
+        "plane": "XY",
+        "name": "旋削断面"
+      }
+    },
+    {
+      "command": "sketch.line",
+      "params": {
+        "points": [
+          [
+            0,
+            10
+          ],
+          [
+            0,
+            18
+          ],
+          [
+            2,
+            20
+          ],
+          [
+            25,
+            20
+          ],
+          [
+            25,
+            26
+          ],
+          [
+            27,
+            28
+          ],
+          [
+            43,
+            28
+          ],
+          [
+            45,
+            26
+          ],
+          [
+            45,
+            20
+          ],
+          [
+            52,
+            20
+          ],
+          [
+            52,
+            17
+          ],
+          [
+            55,
+            17
+          ],
+          [
+            55,
+            20
+          ],
+          [
+            68,
+            20
+          ],
+          [
+            70,
+            18
+          ],
+          [
+            70,
+            10
+          ]
+        ],
+        "closed": true
+      }
+    },
+    {
+      "command": "sketch.finish",
+      "params": {}
+    },
+    {
+      "command": "solid.revolve",
+      "params": {
+        "axis": "X",
+        "angle": "360 deg",
+        "body_name": "段付き中空軸",
+        "name": "回転形状"
+      }
+    },
+    {
+      "command": "cam.turning.set",
+      "params": {
+        "plan": {
+          "machine": "NL2500",
+          "material": "SUS303",
+          "setups": [
+            {
+              "id": "setup-1",
+              "name": "段取り1 · 表加工",
+              "previous_setup": null,
+              "stock": {
+                "outer_diameter_mm": 60,
+                "inner_diameter_mm": 0,
+                "length_mm": 80
+              },
+              "turret": [
+                {
+                  "station": 1,
+                  "role": "center_drill",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 2,
+                  "role": "drill",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 3,
+                  "role": "vacant",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 4,
+                  "role": "vacant",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 5,
+                  "role": "id_rough",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 6,
+                  "role": "od_finish",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 7,
+                  "role": "id_finish",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 8,
+                  "role": "groove_or_thread",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 9,
+                  "role": "groove_or_thread",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 10,
+                  "role": "groove_or_thread",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 11,
+                  "role": "od_groove_rough",
+                  "tool_name": null,
+                  "offset_number": null
+                },
+                {
+                  "station": 12,
+                  "role": "od_rough",
+                  "tool_name": null,
+                  "offset_number": null
+                }
+              ],
+              "operations": [
+                {
+                  "id": "op-1",
+                  "kind": "center_drill",
+                  "name": "センター",
+                  "station": 1,
+                  "manual_separation": null
+                },
+                {
+                  "id": "op-2",
+                  "kind": "drill",
+                  "name": "下穴ドリル",
+                  "station": 2,
+                  "manual_separation": null
+                },
+                {
+                  "id": "op-3",
+                  "kind": "od_rough",
+                  "name": "外径荒",
+                  "station": 12,
+                  "manual_separation": null
+                },
+                {
+                  "id": "op-4",
+                  "kind": "id_rough",
+                  "name": "内径荒",
+                  "station": 5,
+                  "manual_separation": null
+                },
+                {
+                  "id": "op-5",
+                  "kind": "id_finish",
+                  "name": "内径仕上げ",
+                  "station": 7,
+                  "manual_separation": null
+                },
+                {
+                  "id": "op-6",
+                  "kind": "od_finish",
+                  "name": "外径仕上げ",
+                  "station": 6,
+                  "manual_separation": null
+                },
+                {
+                  "id": "op-7",
+                  "kind": "od_groove",
+                  "name": "外径溝",
+                  "station": 11,
+                  "manual_separation": null
+                },
+                {
+                  "id": "op-8",
+                  "kind": "parting_finish",
+                  "name": "突っ切り仕上げ",
+                  "station": null,
+                  "manual_separation": {
+                    "finished_bore_diameter_mm": 20,
+                    "stop_diameter_mm": 20
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "command": "view.apply",
+      "params": {
+        "view": "iso"
+      }
+    }
+  ]
+}

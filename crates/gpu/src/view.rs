@@ -2453,6 +2453,7 @@ impl Renderer {
         lines(pass, &res.line_hidden, &h.hidden);
         lines(pass, &res.line, &pv.lines);
         lines(pass, &res.line, &h.lines);
+        lines(pass, &res.guide_line, &m.guide_lines);
         lines(pass, &res.guide_line, &h.guide_lines);
         for (id, q) in res.quads.iter().filter(|_| !cb.product) {
             if let Some((_, bind)) = res.textures.get(id) {
@@ -2500,6 +2501,7 @@ impl Renderer {
     ) {
         tris(pass, &res.trans, &sk.trans);
         tris(pass, &res.trans, &h.trans);
+        tris(pass, &res.guide_trans, &m.guide_trans);
         tris(pass, &res.guide_trans, &h.guide_trans);
         tris(pass, &res.xray, &pv.xray);
         tris(pass, &res.xray, &h.xray);

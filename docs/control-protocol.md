@@ -257,7 +257,20 @@ labels; `prefs:measure_axis_distances` identifies the checkbox.
 | `ui.resize` | `width`, `height` | |
 | `app.quit` | `force?` (quit without asking about unsaved designs) | `quitting` (the window closes), `asking` (a "save changes?" prompt is open) |
 
-`ui.workspace {workspace?: "design" | "render"}` reads or changes the active workspace.
+`ui.workspace {workspace?: "design" | "render" | "turning"}` reads or changes the active workspace.
+Turning edits a persisted process plan alongside the 3D model. `cam.turning.toolpath`
+calculates front-face/monotone-OD/through-ID nominal-tip paths; `cam.turning.nc` exports
+disarmed review motions for the matching document revision. These are not machine-ready NC.
+`cam.turning.simulate {setup, expected_revision, resolution_mm?: 0.1}` regenerates paths,
+replays stock removal using optional rounded-triangle insert sweeps or nominal points and
+checks confirmed holder envelopes. Insert geometry is an editable trial section, with no
+automatic nose compensation. Missing holders, nominal-only tools and unchecked moves are
+explicit; this does not verify actual tool geometry or a complete machine model.
+See [turning CAM](turning-cam.md) for supported operations and allowance checks.
+
+`ui.inspect.graphics_adapter` names the actual wgpu device. `renderer: "gpu-software"`
+means a software adapter such as WARP, despite using the wgpu rendering API. Normal
+hardware rendering reports `"gpu"`; without wgpu, the viewport reports `"cpu"`.
 Entering Render requires finishing the current modelling operation; returning restores
 the Design camera. See [the integrated Render workspace](render-workspace.md).
 
@@ -323,6 +336,21 @@ UI callers apply the camera with their animation preference, without editing the
 Shift-orbit snapping includes 45-degree edge views and isometric corner views, with a
 lightly damped spring transition and a small boundary margin to prevent flicker.
 
+### Turning catalogue references
+
+`cam.tool_catalog.list` returns the curated Kyocera insert/holder dimensions, sources and check date.
+`cam.turning.catalog.apply` takes `setup`, `station`, `expected_revision`, and `selection: {insert, holder}`
+(model strings or null). This undoable operation checks station use and seat size, applies insert
+IC/thickness/R, and clears changed holder geometry and holder verification. It does not download
+manufacturer CAD or verify a mounted tool. The UI's independent 3D catalogue view shows simplified
+analytic shapes or a user-registered STEP display mesh; it uses the shared camera navigation.
+
+`cam.turning.holder_cad.import` takes `setup`, `station`, `holder` (matching the registered
+catalogue model), `path` (.step/.stp) and `expected_revision`. It accepts at most 4 MiB,
+32 closed bodies, 150,000 vertices and 100,000 triangles per tool; partial imports are refused.
+It stores a 0.1 mm display tessellation and source basename with the plan, retaining file axes
+and millimetres. It never adds the holder to workpiece geometry or enables collision checking.
+Changing the holder identity clears this preview; removal and import are undoable.
 ### Command search
 
 `ui.palette {text?, open?}` opens command search under the ribbon search field; `open: false`

@@ -325,6 +325,9 @@ pub(crate) fn visible_sketches(app: &SolveApp) -> Vec<u64> {
 /// What Home, Fit and the orbit pivot frame: the bodies and sketches shown now, where they are
 /// now (see [`solidcraft_engine::view::bounds`]).
 pub fn view_bounds(app: &SolveApp) -> solidcraft_engine::geom::Aabb3 {
+    if let Some(bounds) = crate::turning_workspace::catalogue_bounds(app) {
+        return bounds;
+    }
     // Bodies still being meshed after an open frame the view by their outlines.
     if crate::open_meshing::framing(app) {
         return solidcraft_engine::view::unmeshed_bounds(&app.session);
@@ -369,6 +372,7 @@ fn in_view(proj: &Proj, b: &solidcraft_engine::geom::Aabb3) -> bool {
 
 fn scene_key(app: &SolveApp) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    crate::turning_workspace::spatial::scene_key(app).hash(&mut h);
     app.session.revision.hash(&mut h);
     (std::sync::Arc::as_ptr(&crate::open_meshing::shown_world(app)) as usize).hash(&mut h);
     app.ui.show_grid.hash(&mut h);
@@ -494,6 +498,11 @@ fn drawn_plan(
     b: &solidcraft_engine::doc::ModelBody,
     opaque: bool,
 ) -> Option<std::sync::Arc<solidcraft_engine::geom::tess::TessPlan>> {
+    // CAM sections use the reference triangles and the regular capped-section pipeline.
+    // The device-evaluated body path did not clip the model in the DX12 reproduction.
+    if crate::turning_workspace::spatial::section_plane(app).is_some() {
+        return None;
+    }
     let shaded = app.ui.visual_style != 2;
     (shaded && opaque && app.viewport.gpu.is_some_and(|g| g.tess))
         .then(|| refined(app, b).map(|(plan, _)| plan).or_else(|| b.display_plan()))
@@ -879,6 +888,9 @@ fn shared_mesh(
 }
 
 pub(crate) fn build_scene(app: &SolveApp) -> GpuScene {
+    if let Some(scene) = crate::turning_workspace::spatial::stage_scene(app) {
+        return scene;
+    }
     let tk = Tokens::get();
     let mut sc = GpuScene::default();
     let s = &app.session;
@@ -1360,6 +1372,9 @@ type BodyBounds = (std::sync::Arc<solidcraft_engine::doc::ModelState>, std::sync
 
 /// The model's extent: bodies (from the cached boxes) and sketches.
 pub fn model_bounds(app: &SolveApp) -> solidcraft_engine::geom::Aabb3 {
+    if let Some(bounds) = crate::turning_workspace::catalogue_bounds(app) {
+        return bounds;
+    }
     let st = crate::open_meshing::shown_world(app);
     let bodies = body_bounds(app, &st).iter().fold(solidcraft_engine::geom::Aabb3::EMPTY, |a, (_, x)| a.union(x));
     let mut b = bodies.union(&sketch_bounds(app, &st));
@@ -1832,6 +1847,9 @@ pub fn active_view(app: &SolveApp) -> solidcraft_engine::sketch::SketchView {
 }
 
 pub fn section_plane(app: &SolveApp) -> Option<(Vec3, Vec3)> {
+    if let Some(plane) = crate::turning_workspace::spatial::section_plane(app) {
+        return Some(plane);
+    }
     if let Some(d) = app.dialog.as_ref().filter(|d| matches!(d.kind, crate::dialogs::Kind::Section { .. })) {
         let cmds = crate::dialogs::apply_commands(app, d).ok()?;
         let (_, p) = cmds.into_iter().next()?;
@@ -2339,6 +2357,7 @@ fn hover_drawn(hover: &Option<Hit>) -> String {
 
 fn highlight_geometry_key(app: &SolveApp) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    crate::turning_workspace::spatial::scene_key(app).hash(&mut h);
     let selected = app.highlighted();
     app.session.revision.hash(&mut h);
     (std::sync::Arc::as_ptr(&crate::open_meshing::shown_world(app)) as usize).hash(&mut h);
@@ -2510,6 +2529,9 @@ fn highlight_block_tris(app: &SolveApp, b: &solidcraft_engine::doc::ModelBody) -
 
 /// The highlight scene: origin widget, construction planes, selection and hover.
 pub(crate) fn build_highlight(app: &SolveApp) -> GpuScene {
+    if crate::turning_workspace::spatial::replacing_model(app) {
+        return GpuScene::default();
+    }
     let began = crate::now_ms();
     let t = Tokens::get();
     let mut sc = GpuScene::default();
@@ -3261,7 +3283,8 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             && app.dialog.is_none()
             && crate::dim_view::pick_reference(ui.ctx(), p, resp.double_clicked());
         if resp.clicked() && !held && !reference_pick {
-            if app.tool.is_some() {
+            if crate::turning_workspace::spatial::click(app, cand.as_ref().map(|c| &c.0), p, &proj) {
+            } else if app.tool.is_some() {
                 crate::tools::on_click(app, &proj, p, mods.shift);
             } else if app.dialog.as_ref().is_some_and(|d| d.wants_picks()) {
                 if let Some((hit, Some(sel))) = cand {

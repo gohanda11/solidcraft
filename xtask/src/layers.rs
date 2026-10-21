@@ -43,6 +43,7 @@ pub const TABLE: &[(&str, Class)] = &[
     // the 3Dconnexion driver's client API on macOS (no workspace dependencies)
     ("3dx-client", Class::Standalone),
     ("sketch", Class::Layer(1)),
+    ("cam", Class::Layer(1)),
     ("kernel", Class::Layer(1)),
     ("render", Class::Layer(1)),
     ("doc", Class::Layer(2)),
