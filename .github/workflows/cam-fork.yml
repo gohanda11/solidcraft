@@ -16,7 +16,7 @@ jobs:
   turning:
     if: github.repository == 'gohanda11/solidcraft'
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CARGO_BUILD_JOBS: '4'
       PYTHONUTF8: '1'
@@ -34,6 +34,8 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
       - run: cargo fmt --all -- --check
       - run: cargo xtask assets
       - run: cargo xtask lists

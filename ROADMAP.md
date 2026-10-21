@@ -2,6 +2,12 @@
 
 ## Local turning CAM extension (2026-10-16)
 
+2026-10-21: independent decoding of exported review NC checks stepped OD/ID,
+drilling and OD groove allowances, feeds and nominal retracts against analytic
+dimensions. The NL reference differences and remaining machine checks are recorded
+in [the NC audit](docs/turning-nc-audit.md). The UI settling fixture now uses a valid
+in-plane revolve axis and verifies that its preview geometry can be generated.
+
 2026-10-21: NL conversational-reference review output adds signed diameter X, G99/G18,
 G50/G54..G59, T-code mapping, G96/G97 defaults and per-operation spindle overrides.
 Example auxiliary/return blocks require explicit selection. See [NL output settings](docs/turning-nl-post.md).

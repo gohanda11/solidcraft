@@ -212,3 +212,230 @@ fn id_motion_is_mapped_to_negative_diameter_and_no_stock_face_is_explicit() {
     let text = review_nc(&s, &NlPost::default()).unwrap();
     assert!(text.contains("TANMEN,ARA - NO MATERIAL TO REMOVE"));
 }
+
+// Read the review body independently of the planner's phases/spans. These checks
+// use analytic dimensions, not a second rendering of the calculated path. M30 is
+// retained in the file; this is a test reader, not a controller or an NC importer.
+#[derive(Default)]
+struct ReadSection {
+    tool: u32,
+    mode: u32,
+    speed: f64,
+    max_rpm: f64,
+    entry: Option<ProfilePoint>,
+    moves: Vec<ReadMove>,
+}
+struct ReadMove {
+    from: ProfilePoint,
+    to: ProfilePoint,
+    rapid: bool,
+    feed: f64,
+}
+fn read_review(text: &str) -> Vec<ReadSection> {
+    let mut sections: Vec<ReadSection> = Vec::new();
+    let mut position = None;
+    for line in text.lines().filter(|l| !l.starts_with('(')) {
+        if line.starts_with('N') {
+            assert_eq!(word(line, 'N') as usize, sections.len() + 1);
+            sections.push(ReadSection::default());
+            position = None;
+            continue;
+        }
+        let Some(section) = sections.last_mut() else { continue };
+        if line.starts_with("G0T") {
+            section.tool = word(line, 'T') as u32;
+        } else if line.starts_with("G50S") {
+            section.max_rpm = word(line, 'S');
+        } else if line.starts_with("G96S") || line.starts_with("G97S") {
+            section.mode = word(line, 'G') as u32;
+            section.speed = word(line, 'S');
+        } else if line.starts_with("G0X") || line.starts_with("G1X") {
+            let to = ProfilePoint { diameter_mm: -word(line, 'X'), z_mm: word(line, 'Z') };
+            assert!(to.diameter_mm.is_finite() && to.z_mm.is_finite());
+            if let Some(from) = position {
+                let rapid = line.starts_with("G0X");
+                section.moves.push(ReadMove { from, to, rapid, feed: if rapid { 0. } else { word(line, 'F') } });
+            } else {
+                assert!(line.starts_with("G0X"));
+                section.entry = Some(to);
+            }
+            position = Some(to);
+        }
+    }
+    sections
+}
+fn close(actual: f64, expected: f64) {
+    assert!((actual - expected).abs() < 1e-7, "{actual} != {expected}");
+}
+fn read_profile(points: &[(f64, f64)]) -> Vec<ProfilePoint> {
+    points.iter().map(|&(z_mm, diameter_mm)| ProfilePoint { z_mm, diameter_mm }).collect()
+}
+fn sample_cut(section: &ReadSection, check: impl Fn(ProfilePoint)) {
+    assert!(!section.moves.is_empty());
+    for movement in section.moves.iter().filter(|m| !m.rapid) {
+        assert!(movement.feed > 0.);
+        for t in [0., 0.25, 0.5, 0.75, 1.] {
+            check(ProfilePoint {
+                diameter_mm: movement.from.diameter_mm + t * (movement.to.diameter_mm - movement.from.diameter_mm),
+                z_mm: movement.from.z_mm + t * (movement.to.z_mm - movement.from.z_mm),
+            });
+        }
+    }
+}
+
+#[test]
+fn exported_stepped_od_retains_radial_and_shoulder_stock_then_finishes_to_size() {
+    let mut s = setup();
+    s.od_job.as_mut().unwrap().profile = read_profile(&[(0., 30.), (-12., 30.), (-12., 36.), (-30., 36.)]);
+    let sections = read_review(&review_nc(&s, &NlPost::default()).unwrap());
+    assert_eq!(sections.iter().map(|s| s.tool).collect::<Vec<_>>(), [1212, 1212, 606, 606]);
+    for (i, section) in sections.iter().enumerate() {
+        assert_eq!(section.mode, 96);
+        close(section.speed, if i < 2 { 150. } else { 200. });
+        close(section.max_rpm, 2000.);
+        close(section.entry.unwrap().z_mm, 3.);
+        for movement in section.moves.iter().filter(|m| !m.rapid) {
+            close(movement.feed, if i < 2 { 0.1 } else { 0.06 });
+        }
+        for movement in section.moves.iter().filter(|m| m.rapid && (m.from.z_mm - m.to.z_mm).abs() > 1e-7) {
+            assert!(movement.from.diameter_mm >= 44. - 1e-7 && movement.to.diameter_mm >= 44. - 1e-7);
+        }
+    }
+    sample_cut(&sections[0], |p| assert!(p.z_mm >= 0.1 - 1e-7));
+    sample_cut(&sections[1], |p| {
+        if p.z_mm < 0.1 - 1e-7 {
+            let boundary = if p.z_mm < -11.9 - 1e-7 { 36.2 } else { 30.2 };
+            assert!(p.diameter_mm >= boundary - 1e-7, "OD gouge at {p:?}");
+        }
+        assert!(p.z_mm >= -30. - 1e-7);
+    });
+    for expected in [(0., 30.), (-12., 30.), (-12., 36.), (-30., 36.)] {
+        assert!(sections[3].moves.iter().any(|m| !m.rapid && (m.to.z_mm - expected.0).abs() < 1e-7 && (m.to.diameter_mm - expected.1).abs() < 1e-7));
+    }
+    assert!(sections[2].moves.iter().any(|m| !m.rapid && m.to.z_mm.abs() < 1e-7));
+    assert!(sections[1].moves.iter().any(|m| !m.rapid && (m.to.z_mm + 30.).abs() < 1e-7), "rough the rear extent too");
+}
+
+#[test]
+fn exported_stepped_id_keeps_stock_on_the_inside_and_retracts_in_the_prebore() {
+    let mut s = setup();
+    let mut job = s.od_job.take().unwrap();
+    job.profile = read_profile(&[(0., 20.), (-10., 20.), (-10., 16.), (-30., 16.)]);
+    s.id_job = Some(job);
+    s.stock.as_mut().unwrap().inner_diameter_mm = 10.;
+    s.operations.retain(|o| matches!(o.kind, K::OdRough | K::OdFinish));
+    for (op, kind) in s.operations.iter_mut().zip([K::IdRough, K::IdFinish]) {
+        op.kind = kind;
+        op.station = kind.suggested_station();
+    }
+    let sections = read_review(&review_nc(&s, &NlPost::default()).unwrap());
+    assert_eq!(sections.iter().map(|s| s.tool).collect::<Vec<_>>(), [505, 707]);
+    sample_cut(&sections[0], |p| {
+        if p.z_mm < 0.1 - 1e-7 {
+            let boundary = if p.z_mm < -9.9 - 1e-7 { 15.8 } else { 19.8 };
+            assert!(p.diameter_mm <= boundary + 1e-7, "ID gouge at {p:?}");
+        }
+        assert!(p.z_mm >= -30. - 1e-7);
+    });
+    for (i, section) in sections.iter().enumerate() {
+        close(section.entry.unwrap().diameter_mm, 6.);
+        for movement in section.moves.iter().filter(|m| !m.rapid) {
+            close(movement.feed, if i == 0 { 0.1 } else { 0.06 });
+        }
+        for movement in section.moves.iter().filter(|m| m.rapid && (m.from.z_mm - m.to.z_mm).abs() > 1e-7) {
+            assert!(movement.from.diameter_mm <= 6. + 1e-7 && movement.to.diameter_mm <= 6. + 1e-7);
+        }
+    }
+    for expected in [(0., 20.), (-10., 20.), (-10., 16.), (-30., 16.)] {
+        assert!(sections[1].moves.iter().any(|m| !m.rapid && (m.to.z_mm - expected.0).abs() < 1e-7 && (m.to.diameter_mm - expected.1).abs() < 1e-7));
+    }
+}
+
+#[test]
+fn exported_drilling_uses_tip_depth_and_fully_retracts_between_pecks() {
+    use crate::machining::sequence::{Cutting, Drill, Limits};
+    let mut s = setup();
+    s.od_job = None;
+    let limits = Limits { stock_front_z_mm: 1., chuck_front_z_mm: -45., clearance_mm: 2. };
+    s.operations = [(K::CenterDrill, 3., -2., 0., 0.04), (K::Drill, 8., -25., 4., 0.08)]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (kind, diameter_mm, tip_end_z_mm, peck_mm, feed_mm_rev))| Operation {
+            id: format!("drill-{index}"),
+            name: "analytic".into(),
+            kind,
+            station: kind.suggested_station(),
+            spindle: None,
+            manual_separation: None,
+            cutting: Some(Cutting::Drill(Drill { limits: limits.clone(), diameter_mm, tip_end_z_mm, peck_mm, feed_mm_rev, ..Default::default() })),
+        })
+        .collect();
+    let sections = read_review(&review_nc(&s, &NlPost::default()).unwrap());
+    assert_eq!(sections.iter().map(|s| s.tool).collect::<Vec<_>>(), [101, 202]);
+    for (section, expected_feed) in sections.iter().zip([0.04, 0.08]) {
+        assert_eq!(section.mode, 97);
+        close(section.speed, 1000.);
+        for movement in &section.moves {
+            close(movement.to.diameter_mm, 0.);
+            if movement.rapid {
+                close(movement.to.z_mm, 3.);
+            } else {
+                close(movement.from.z_mm, 3.);
+                close(movement.feed, expected_feed);
+            }
+        }
+    }
+    let depths: Vec<_> = sections[1].moves.iter().filter(|m| !m.rapid).map(|m| m.to.z_mm).collect();
+    assert_eq!(depths, [-3., -7., -11., -15., -19., -23., -25.]);
+    let full_diameter_z = depths.last().unwrap() + 4. / 59f64.to_radians().tan();
+    assert!(full_diameter_z > -23. && full_diameter_z < -22.);
+}
+
+#[test]
+fn exported_groove_keeps_both_walls_and_radial_stock_with_the_front_edge_reference() {
+    use crate::machining::sequence::{Cutting, Groove, Limits};
+    let mut s = setup();
+    s.od_job = None;
+    let g = Groove {
+        limits: Limits { stock_front_z_mm: 1., chuck_front_z_mm: -45., clearance_mm: 2. },
+        front_z_mm: -8.,
+        width_mm: 4.,
+        bottom_diameter_mm: 24.,
+        tool_width_mm: 2.,
+        radial_depth_mm: 1.,
+        feed_mm_rev: 0.06,
+        ..Default::default()
+    };
+    s.operations = [K::OdGrooveRough, K::OdGrooveFinish]
+        .into_iter()
+        .enumerate()
+        .map(|(index, kind)| Operation {
+            id: format!("groove-{index}"),
+            name: "analytic".into(),
+            kind,
+            station: kind.suggested_station(),
+            spindle: None,
+            manual_separation: None,
+            cutting: Some(Cutting::OdGroove(g.clone())),
+        })
+        .collect();
+    let sections = read_review(&review_nc(&s, &NlPost::default()).unwrap());
+    sample_cut(&sections[0], |p| {
+        assert!(p.diameter_mm >= 24.2 - 1e-7);
+        assert!(p.z_mm <= -8.1 + 1e-7 && p.z_mm - 2. >= -11.9 - 1e-7);
+    });
+    assert_eq!(sections.iter().map(|section| section.tool).collect::<Vec<_>>(), [1111, 808]);
+    for section in &sections {
+        assert_eq!(section.mode, 97);
+        close(section.speed, 700.);
+        for movement in section.moves.iter().filter(|m| !m.rapid) {
+            close(movement.feed, 0.06);
+        }
+        for m in section.moves.iter().filter(|m| m.rapid && (m.from.z_mm - m.to.z_mm).abs() > 1e-7) {
+            assert!(m.from.diameter_mm >= 44. - 1e-7 && m.to.diameter_mm >= 44. - 1e-7);
+        }
+    }
+    for z in [-8., -10.] {
+        assert!(sections[1].moves.iter().any(|m| !m.rapid && (m.to.diameter_mm - 24.).abs() < 1e-7 && (m.to.z_mm - z).abs() < 1e-7));
+    }
+}
