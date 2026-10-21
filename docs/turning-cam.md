@@ -3,7 +3,7 @@
 ユーザーとの設計相談で合意した旋削 CAM の開発方針と実装状況。
 本家の CAM ロードマップとは独立した機能開発です。
 開発先は [gohanda11/solidcraft](https://github.com/gohanda11/solidcraft)、
-ブランチは `cam/turning-foundation`。2026-10-21 に本家 `57bcc408`（0.18.2）へ統合しました。
+ブランチは `cam/turning-foundation`。2026-10-21 に本家 `cbac4eab`（0.18.2 と、その後の16コミット）へ統合しました。
 `main` は本家の比較基準として維持します。[更新・差分管理の手順](cam-fork-workflow.md) を参照してください。
 以下の過去の検証記録にある「未コミット」「未統合」は当時の状態です。
 
