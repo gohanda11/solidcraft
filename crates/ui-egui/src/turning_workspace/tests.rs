@@ -385,6 +385,30 @@ fn turning_path_preview_export_and_revision_invalidation_use_real_buttons() {
 }
 
 #[test]
+fn turning_nl_output_format_is_saved_and_applies_to_export_from_the_fifth_step() {
+    let mut h = Harness::new();
+    let script: serde_json::Value = serde_json::from_str(include_str!("../../../../examples/turning-toolpath.json")).unwrap();
+    for c in script["commands"].as_array().unwrap() {
+        h.app.run(c["command"].as_str().unwrap(), c["params"].clone()).unwrap();
+    }
+    h.app.home.open = false;
+    enter(&mut h.app, "turning").unwrap();
+    click(&mut h, "cam_step_3");
+    click(&mut h, "cam_post_format");
+    click(&mut h, "cam_post_nl");
+    assert!(h.app.session.doc.turning.as_ref().unwrap().setups[0].post.is_some());
+    click(&mut h, "cam_path_calculate");
+    click(&mut h, "cam_path_nc_view");
+    assert!(h.widget("O9001 (SOLIDCRAFT NL SAMPLE REVIEW)").is_some());
+    click(&mut h, "cam_path_back_paths");
+    click(&mut h, "cam_path_export");
+    h.frames(4);
+    let nc = std::fs::read_to_string(h.dir.join("turning-review.nc")).unwrap();
+    assert!(nc.contains("G0T1212") && nc.contains("G96S150.000M3") && nc.contains("G1X-"));
+    assert!(nc.find("M30").unwrap() < nc.find("G0T").unwrap());
+}
+
+#[test]
 fn turning_model_profile_buttons_fill_an_empty_profile_and_calculate() {
     let mut h = Harness::new();
     let script: serde_json::Value = serde_json::from_str(include_str!("../../../../examples/turning-toolpath.json")).unwrap();

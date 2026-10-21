@@ -19,7 +19,7 @@ fn groove() -> Groove {
     }
 }
 fn op(id: &str, kind: K, cutting: Option<Cutting>) -> crate::Operation {
-    crate::Operation { id: id.into(), name: id.into(), kind, station: kind.suggested_station(), cutting, manual_separation: None }
+    crate::Operation { spindle: None, id: id.into(), name: id.into(), kind, station: kind.suggested_station(), cutting, manual_separation: None }
 }
 fn setup() -> Setup {
     let mut p = crate::TurningPlan::nl2500();

@@ -75,6 +75,7 @@ fn zero_allowance_proposes_rough_finish_only_when_needed_and_nc_keeps_operations
     let s = setup();
     let mut bad = s.clone();
     bad.operations = vec![Operation {
+        spindle: None,
         id: "finish".into(),
         name: "finish".into(),
         kind: c.kind(),
@@ -116,6 +117,7 @@ fn inner_selection_requires_preceding_full_depth_bore() {
         feed_mm_rev: 0.08,
     };
     s.operations.push(Operation {
+        spindle: None,
         id: "drill".into(),
         name: "drill".into(),
         kind: K::Drill,
@@ -164,6 +166,7 @@ fn face_only_is_allowed_and_finishing_is_not_lost_to_global_job_toggle() {
     let mut s = setup();
     s.od_job.as_mut().unwrap().finish = false;
     let op = |kind: K| Operation {
+        spindle: None,
         id: format!("{kind:?}"),
         name: "face".into(),
         kind,

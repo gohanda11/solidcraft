@@ -131,7 +131,7 @@ pub(super) fn settings(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut St
     if step == 0 {
         controls::section(ui, tr("cam.machine"), |ui| {
             controls::dropdown(ui, "cam_machine_list", plan.machine.clone(), |ui| {
-                for machine in ["NL2500", "SL25"] {
+                for machine in ["NL2500", "NL2000", "SL25"] {
                     controls::value(ui, &mut plan.machine, machine.into(), machine);
                 }
             });
@@ -281,6 +281,7 @@ pub(super) fn settings(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut St
             ui.label(tr("cam.guide_order"));
         }
         _ => {
+            super::post_ui::show(ui, setup, &mut state.operation);
             ui.label(tr("cam.guide_review_help"));
             if setup.id_job.is_some()
                 && setup.stock.as_ref().is_none_or(|s| s.inner_diameter_mm <= 0.0)

@@ -508,6 +508,7 @@ pub fn propose(setup: &Setup, station: u8, c: &Contour) -> Result<Proposal> {
             .find(|id| !setup.operations.iter().chain(operations.iter()).any(|o: &Operation| &o.id == id))
             .unwrap_or_else(|| "range-overflow".into());
         operations.push(Operation {
+            spindle: None,
             id,
             name: match cut.kind() {
                 K::OdRough => "外径荒",

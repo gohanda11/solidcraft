@@ -5,6 +5,7 @@ fn manual_plan() -> TurningPlan {
     let setup = &mut plan.setups[0];
     setup.stock = Some(Stock { outer_diameter_mm: 50.0, inner_diameter_mm: 0.0, length_mm: 60.0 });
     setup.operations.push(Operation {
+        spindle: None,
         cutting: None,
         id: "finish-back".into(),
         name: "Back face finish, manual separation".into(),

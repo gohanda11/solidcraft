@@ -25,6 +25,7 @@ struct NcPreview {
 
 #[derive(Clone, Debug, Default)]
 pub struct View {
+    post_operation: usize,
     text: String,
     loaded_setup: String,
     loaded_profile: Vec<ProfilePoint>,
@@ -63,6 +64,7 @@ fn parse_profile(text: &str) -> Result<Vec<ProfilePoint>, String> {
 }
 
 pub fn settings(ui: &mut egui::Ui, setup: &mut Setup, view: &mut View, revision: u64) {
+    super::post_ui::show(ui, setup, &mut view.post_operation);
     ui.small(tr("cam.path_scope"));
     if setup.od_job.is_none() {
         if ui_kit::button(ui, tr("cam.path_enable"), ui_kit::Button::Normal).clicked() {
