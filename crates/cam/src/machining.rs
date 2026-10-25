@@ -533,8 +533,12 @@ fn outward(value: f64) -> f64 {
 /// Review motion fragment, deliberately disarmed with M30 before any moves.
 /// No machine-dependent tool change, work offset, spindle or nose compensation is invented.
 pub fn review_nc(path: &Toolpath) -> Result<String> {
+    review_program(path).map(|program| program.text)
+}
+
+pub fn review_program(path: &Toolpath) -> Result<crate::post::ReviewProgram> {
     if let Some(setup) = &path.source_setup {
-        return sequence::review_nc(setup);
+        return sequence::review_program(setup);
     }
     let mut validated = if path.inner {
         interior::calculate(&path.job, &path.stock)?
@@ -551,8 +555,9 @@ pub fn review_nc(path: &Toolpath) -> Result<String> {
         previous_point = Some(m.to);
     }
     interior::verify_combined(&validated)?;
-    let mut text = String::from(
+    let mut text = crate::post::ReviewWriter::new(
         "%\nO9001 (SOLIDCRAFT REVIEW ONLY)\nM30\n(NOT A MACHINE READY PROGRAM - MOTIONS BELOW ARE DISARMED)\n(NOMINAL TIP - NO NOSE OR HOLDER COMPENSATION)\n(PROFILE - VERIFY AGAINST CAD AND DRAWING)\n(X DIAMETER MM - Z ABSOLUTE MM - F MM PER REV)\n(TOOL CALLS WORK OFFSET SPINDLE AND FEED MODE MUST BE PROVIDED)\n(FACE OD AND THROUGH ID AS PLANNED - NO DRILLING GROOVES OR THREADS)\n",
+        validated.moves.len(),
     );
     text.push_str("(X ROUNDED TOWARD AIR: OD UP / ID DOWN; Z UP TO 0.0001 MM)\n");
     text.push_str(&format!(
@@ -571,7 +576,7 @@ pub fn review_nc(path: &Toolpath) -> Result<String> {
         text.push_str(&format!("(REQUIRED START POSITION X{:.4} Z{:.4})\n", first.from.diameter_mm, first.from.z_mm));
     }
     let mut previous = None;
-    for m in &validated.moves {
+    for (index, m) in validated.moves.iter().enumerate() {
         if previous != Some(m.phase) {
             text.push_str(&format!("({:?})\n", m.phase));
             if interior::is_inner(m.phase) {
@@ -584,6 +589,7 @@ pub fn review_nc(path: &Toolpath) -> Result<String> {
             previous = Some(m.phase);
         }
         let code = if m.motion == Motion::Rapid { "G00" } else { "G01" };
+        text.mark_move(index)?;
         // Each rapid changes a single axis even after quantization. Feed moves state both.
         if m.motion == Motion::Rapid {
             if (m.from.diameter_mm - m.to.diameter_mm).abs() > EPS {
@@ -596,7 +602,7 @@ pub fn review_nc(path: &Toolpath) -> Result<String> {
         }
     }
     text.push_str("M30\n%\n");
-    Ok(text)
+    Ok(text.finish())
 }
 
 #[cfg(test)]

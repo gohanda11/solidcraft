@@ -7,7 +7,9 @@ pub(super) struct Draft {
     group: usize,
     kind: Option<OperationKind>,
     name: String,
-    station: Option<u8>,
+    pub(super) station: Option<u8>,
+    pub(super) compact: bool,
+    pub(super) fresh: bool,
     before: Option<String>,
     pub(super) bore: f64,
     error: Option<String>,
@@ -49,7 +51,18 @@ pub(super) fn button(ui: &mut egui::Ui, id: &str, key: &str, enabled: bool) -> b
 
 pub(super) fn open(plan: &TurningPlan, state: &mut State) {
     let Some(setup) = plan.setups.get(state.setup) else { return };
-    let draft = Draft { setup: setup.id.clone(), group: 0, kind: None, name: String::new(), station: None, before: None, bore: 0., error: None };
+    let draft = Draft {
+        setup: setup.id.clone(),
+        group: 0,
+        kind: None,
+        name: String::new(),
+        station: None,
+        compact: false,
+        fresh: true,
+        before: None,
+        bore: 0.,
+        error: None,
+    };
     guided::go(state, 2);
     state.operation_draft = Some(draft);
     state.error = None;
@@ -65,6 +78,7 @@ pub(super) fn select_tool(draft: &mut Draft, setup: &Setup, station: u8) {
     };
     draft.kind = Some(kind);
     draft.station = Some(station);
+    draft.compact = true;
     draft.name = tr(kind_label(kind)).into();
     draft.group = if matches!(kind, OperationKind::CenterDrill | OperationKind::Drill) { 3 } else { 4 };
 }
@@ -137,104 +151,142 @@ fn station_picker(ui: &mut egui::Ui, setup: &Setup, station: &mut Option<u8>, id
 pub(super) fn composer(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut State) {
     let Some(mut draft) = state.operation_draft.take() else { return };
     let Some(setup) = plan.setups.get(state.setup).filter(|s| s.id == draft.setup) else { return };
-    ui.heading(tr("cam.operation_create_title"));
-    ui.label(&setup.name);
-    ui.add_space(8.);
-    ui.strong(tr("cam.operation_choose_kind"));
-    egui::Grid::new("cam_operation_groups").num_columns(3).spacing([6., 6.]).show(ui, |ui| {
-        for (i, (key, _)) in GROUPS.iter().enumerate() {
-            let r = ui
-                .allocate_ui_with_layout(egui::Vec2::from([96., 32.]), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    controls::pick(ui, draft.group == i, tr(key))
-                })
-                .inner;
-            crate::scenario::publish_rect(&format!("cam_operation_group_{i}"), r.rect);
-            if r.clicked() && draft.group != i {
-                draft.group = i;
-                draft.kind = None;
-                draft.name.clear();
-                draft.station = None;
-                draft.before = None;
-                draft.error = None;
-            }
-            if i % 3 == 2 {
-                ui.end_row();
-            }
+    if draft.fresh && draft.compact {
+        for key in ["cam.operation_change_kind", "cam.operation_more_details"] {
+            let id = ui.make_persistent_id(tr(key));
+            ui.ctx().data_mut(|data| data.insert_persisted(id, false));
         }
-    });
-    ui.add_space(6.);
-    if let Some((_, kinds)) = GROUPS.get(draft.group) {
-        egui::Grid::new("cam_operation_kinds").num_columns(2).spacing([6., 6.]).show(ui, |ui| {
-            for (i, kind) in kinds.iter().enumerate() {
+    }
+    draft.fresh = false;
+    ui.heading(tr("cam.operation_create_title"));
+    let compact = draft.compact;
+    if compact {
+        if let Some(kind) = draft.kind {
+            ui.strong(tr(kind_label(kind)));
+        }
+        station_picker(ui, setup, &mut draft.station, "cam_operation_draft_station");
+    } else {
+        ui.label(&setup.name);
+    }
+    ui.add_space(8.);
+    let mut choose_kind = |ui: &mut egui::Ui| {
+        ui.strong(tr("cam.operation_choose_kind"));
+        egui::Grid::new("cam_operation_groups").num_columns(3).spacing([6., 6.]).show(ui, |ui| {
+            for (i, (key, _)) in GROUPS.iter().enumerate() {
                 let r = ui
-                    .allocate_ui_with_layout(egui::Vec2::from([150., 32.]), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        controls::pick(ui, draft.kind == Some(*kind), tr(kind_label(*kind)))
+                    .allocate_ui_with_layout(egui::Vec2::from([96., 32.]), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        controls::pick(ui, draft.group == i, tr(key))
                     })
                     .inner;
-                crate::scenario::publish_rect(&format!("cam_operation_kind_{kind:?}"), r.rect);
-                if r.clicked() {
-                    draft.kind = Some(*kind);
-                    draft.name = tr(kind_label(*kind)).into();
-                    draft.station = kind.suggested_station().filter(|n| setup.turret.iter().any(|s| s.station == *n && s.role != ToolRole::Vacant));
+                crate::scenario::publish_rect(&format!("cam_operation_group_{i}"), r.rect);
+                if r.clicked() && draft.group != i {
+                    draft.group = i;
+                    draft.kind = None;
+                    draft.name.clear();
+                    draft.station = None;
+                    draft.before = None;
                     draft.error = None;
-                    state.model_profile.inner =
-                        matches!(kind, OperationKind::IdRough | OperationKind::IdFinish | OperationKind::IdGroove | OperationKind::IdThread);
-                    state.spatial.section = state.model_profile.inner;
                 }
-                if i % 2 == 1 {
+                if i % 3 == 2 {
                     ui.end_row();
                 }
             }
         });
+        ui.add_space(6.);
+        if let Some((_, kinds)) = GROUPS.get(draft.group) {
+            egui::Grid::new("cam_operation_kinds").num_columns(2).spacing([6., 6.]).show(ui, |ui| {
+                for (i, kind) in kinds.iter().enumerate() {
+                    let r = ui
+                        .allocate_ui_with_layout(egui::Vec2::from([150., 32.]), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            controls::pick(ui, draft.kind == Some(*kind), tr(kind_label(*kind)))
+                        })
+                        .inner;
+                    crate::scenario::publish_rect(&format!("cam_operation_kind_{kind:?}"), r.rect);
+                    if r.clicked() {
+                        draft.kind = Some(*kind);
+                        draft.name = tr(kind_label(*kind)).into();
+                        draft.station =
+                            kind.suggested_station().filter(|n| setup.turret.iter().any(|s| s.station == *n && s.role != ToolRole::Vacant));
+                        draft.error = None;
+                        state.model_profile.inner =
+                            matches!(kind, OperationKind::IdRough | OperationKind::IdFinish | OperationKind::IdGroove | OperationKind::IdThread);
+                        state.spatial.section = state.model_profile.inner;
+                    }
+                    if i % 2 == 1 {
+                        ui.end_row();
+                    }
+                }
+            });
+        }
+    };
+    if compact {
+        let section = controls::section(ui, tr("cam.operation_change_kind"), choose_kind);
+        crate::scenario::publish_rect("cam_operation_change_kind", section.header_rect);
+        crate::scenario::publish_handle("cam_operation_change_kind", section.header_rect.center());
+    } else {
+        choose_kind(ui);
     }
     ui.add_space(8.);
     if let Some(kind) = draft.kind {
-        ui.strong(format!(
-            "{} · {}",
-            tr(kind_label(kind)),
-            tr(if supported(kind) { "cam.operation_path_supported" } else { "cam.operation_plan_only" })
-        ));
+        if !compact {
+            ui.strong(format!(
+                "{} · {}",
+                tr(kind_label(kind)),
+                tr(if supported(kind) { "cam.operation_path_supported" } else { "cam.operation_plan_only" })
+            ));
+        }
         if !supported(kind) {
             ui.add(egui::Label::new(tr("cam.operation_plan_only_help")).wrap());
         }
         if !cam::machining::sequence::local(kind) && setup.operations.iter().any(|o| o.kind == kind) {
             ui.colored_label(Tokens::get().warning, tr("cam.operation_duplicate_help"));
         }
-        ui.separator();
-        ui.strong(tr("cam.operation_choose_tool"));
-        station_picker(ui, setup, &mut draft.station, "cam_operation_draft_station");
-        ui.small(tr("cam.operation_tool_help"));
+        if !compact {
+            ui.separator();
+            ui.strong(tr("cam.operation_choose_tool"));
+            station_picker(ui, setup, &mut draft.station, "cam_operation_draft_station");
+            ui.small(tr("cam.operation_tool_help"));
+        }
         if kind == OperationKind::PartingFinish {
             number(ui, "cam.finished_bore", &mut draft.bore);
             ui.add(egui::Label::new(tr("cam.bore_help")).wrap());
         }
-        ui.separator();
-        ui.strong(tr("cam.operation_confirm_details"));
-        text(ui, "cam.operation_name", &mut draft.name);
-        let at = insertion(setup, &draft, kind);
-        ui.label(format!("{}: {:02}", tr("cam.operation_position"), at + 1));
-        if !matches!(kind, OperationKind::PartOff | OperationKind::PartingFinish) {
-            let selected = match &draft.before {
-                None => tr("cam.operation_auto_order").to_string(),
-                Some(id) => setup
-                    .operations
-                    .iter()
-                    .find(|o| &o.id == id)
-                    .map(|o| format!("{}: {}", tr("cam.operation_before"), o.name))
-                    .unwrap_or_else(|| tr("cam.operation_end").into()),
-            };
-            controls::dropdown(ui, "cam_operation_position", (selected).to_string(), |ui| {
-                controls::value(ui, &mut draft.before, None, tr("cam.operation_auto_order"));
-                for op in &setup.operations {
-                    controls::value(ui, &mut draft.before, Some(op.id.clone()), format!("{}: {}", tr("cam.operation_before"), op.name));
-                }
-                controls::value(ui, &mut draft.before, Some(String::new()), tr("cam.operation_end"));
-            });
+        let mut details = |ui: &mut egui::Ui| {
+            ui.strong(tr("cam.operation_confirm_details"));
+            text(ui, "cam.operation_name", &mut draft.name);
+            let at = insertion(setup, &draft, kind);
+            ui.label(format!("{}: {:02}", tr("cam.operation_position"), at + 1));
+            if !matches!(kind, OperationKind::PartOff | OperationKind::PartingFinish) {
+                let selected = match &draft.before {
+                    None => tr("cam.operation_auto_order").to_string(),
+                    Some(id) => setup
+                        .operations
+                        .iter()
+                        .find(|o| &o.id == id)
+                        .map(|o| format!("{}: {}", tr("cam.operation_before"), o.name))
+                        .unwrap_or_else(|| tr("cam.operation_end").into()),
+                };
+                controls::dropdown(ui, "cam_operation_position", (selected).to_string(), |ui| {
+                    controls::value(ui, &mut draft.before, None, tr("cam.operation_auto_order"));
+                    for op in &setup.operations {
+                        controls::value(ui, &mut draft.before, Some(op.id.clone()), format!("{}: {}", tr("cam.operation_before"), op.name));
+                    }
+                    controls::value(ui, &mut draft.before, Some(String::new()), tr("cam.operation_end"));
+                });
+            } else {
+                ui.small(tr("cam.operation_separation_last"));
+            }
+            if let Some(next) = setup.operations.get(at) {
+                ui.small(format!("{}: {}", tr("cam.operation_before"), next.name));
+            }
+        };
+        if compact {
+            let section = controls::section(ui, tr("cam.operation_more_details"), details);
+            crate::scenario::publish_rect("cam_operation_more_details", section.header_rect);
+            crate::scenario::publish_handle("cam_operation_more_details", section.header_rect.center());
         } else {
-            ui.small(tr("cam.operation_separation_last"));
-        }
-        if let Some(next) = setup.operations.get(at) {
-            ui.small(format!("{}: {}", tr("cam.operation_before"), next.name));
+            ui.separator();
+            details(ui);
         }
         ui.small(tr("cam.operation_after_add"));
     } else {
@@ -278,11 +330,12 @@ pub(super) fn composer(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut St
         let id = next_id(&candidate, "operation");
         if let Some(setup) = candidate.setups.get_mut(state.setup) {
             let at = insertion(setup, &draft, kind);
+            let cutting = default_cutting(kind, setup);
             setup.operations.insert(
                 at,
                 Operation {
                     spindle: None,
-                    cutting: default_cutting(kind),
+                    cutting,
                     id,
                     name: draft.name.trim().into(),
                     kind,
@@ -309,7 +362,7 @@ pub(super) fn composer(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut St
 }
 
 /// Common visible controls for the selected operation in the guided flow.
-pub(super) fn selected(ui: &mut egui::Ui, setup: &mut Setup, state: &mut State) -> bool {
+pub(super) fn selected(ui: &mut egui::Ui, setup: &mut Setup, state: &mut State, revision: u64) -> bool {
     let Some(op) = setup.operations.get(state.operation) else {
         ui.label(tr("cam.no_operations"));
         return false;
@@ -363,17 +416,30 @@ pub(super) fn selected(ui: &mut egui::Ui, setup: &mut Setup, state: &mut State) 
         && (cam::machining::sequence::local(kind)
             || setup.operations.get(state.operation).is_some_and(|o| matches!(o.cutting, Some(cam::machining::sequence::Cutting::Contour(_)))))
     {
+        if let Some(cam::machining::sequence::Cutting::Contour(c)) = setup.operations.get(state.operation).and_then(|o| o.cutting.as_ref()) {
+            if c.points(setup).is_err() {
+                let response = ui.colored_label(Tokens::get().warning, tr("cam.range_stale"));
+                crate::scenario::publish_rect("cam_range_stale", response.rect);
+            }
+            if button(ui, "cam_operation_edit_range", "cam.range_edit", true) {
+                selection_ui::begin_update(setup, state, revision);
+                return false;
+            }
+        }
         local_settings(ui, setup, state.operation);
         return false;
     }
     !removed && supported(kind)
 }
 
-fn default_cutting(kind: OperationKind) -> Option<cam::machining::sequence::Cutting> {
-    use cam::machining::sequence::{Cutting, Drill, Groove};
+fn default_cutting(kind: OperationKind, setup: &Setup) -> Option<cam::machining::sequence::Cutting> {
+    use cam::machining::sequence::{self, Cutting, Drill, Groove};
+    // Draft dimensions and feeds may still be empty. Only inherit the separately
+    // validated common placement; never guess between inconsistent prior limits.
+    let limits = (setup.od_job.is_none() && setup.id_job.is_none()).then(|| sequence::shared_limits(setup).ok()).flatten().unwrap_or_default();
     match kind {
-        OperationKind::CenterDrill | OperationKind::Drill => Some(Cutting::Drill(Drill::default())),
-        OperationKind::OdGrooveRough | OperationKind::OdGrooveFinish => Some(Cutting::OdGroove(Groove::default())),
+        OperationKind::CenterDrill | OperationKind::Drill => Some(Cutting::Drill(Drill { limits, ..Drill::default() })),
+        OperationKind::OdGrooveRough | OperationKind::OdGrooveFinish => Some(Cutting::OdGroove(Groove { limits, ..Groove::default() })),
         _ => None,
     }
 }
@@ -382,6 +448,53 @@ fn local_number(ui: &mut egui::Ui, key: &str, value: &mut f64, range: std::ops::
     ui.label(tr(key));
     let response = ui_kit::number_field(ui, value, range, 0.01, unit);
     crate::scenario::publish_rect(key, response.rect);
+    if response.enabled() && ui.is_rect_visible(response.rect) {
+        crate::scenario::publish_handle(key, response.rect.center());
+    }
+}
+
+/// Readiness is deliberately separate from draft validation: empty fields remain editable
+/// and saved as entered, but cannot advance to a misleading simulation failure.
+pub(super) fn local_issue(setup: &Setup, index: usize) -> Option<String> {
+    use cam::machining::sequence::{self, Cutting};
+    let operation = setup.operations.get(index)?;
+    if !sequence::local(operation.kind) {
+        return None;
+    }
+    let Some(cutting) = &operation.cutting else { return Some(tr("cam.local_configure").into()) };
+    let mut fields = Vec::new();
+    let mut require = |key: &'static str, valid: bool| {
+        if !valid {
+            fields.push(tr(key));
+        }
+    };
+    let positive = |value: f64| value.is_finite() && value > 0.;
+    let limits = cutting.limits();
+    let stock_front = setup.od_job.as_ref().or(setup.id_job.as_ref()).map_or(limits.stock_front_z_mm, |job| job.stock_front_z_mm);
+    match cutting {
+        Cutting::Drill(drill) => {
+            require("cam.drill_diameter", positive(drill.diameter_mm));
+            require("cam.drill_tip_z", drill.tip_end_z_mm.is_finite() && drill.tip_end_z_mm < stock_front);
+            require("cam.local_feed", positive(drill.feed_mm_rev));
+        }
+        Cutting::OdGroove(groove) => {
+            require("cam.groove_front_z", groove.front_z_mm.is_finite() && groove.front_z_mm < 0.);
+            require("cam.groove_width", positive(groove.width_mm));
+            require("cam.groove_bottom", positive(groove.bottom_diameter_mm));
+            require("cam.groove_tool_width", positive(groove.tool_width_mm));
+            require("cam.path_depth", positive(groove.radial_depth_mm));
+            require("cam.local_feed", positive(groove.feed_mm_rev));
+        }
+        Cutting::Contour(_) => {}
+    }
+    if !fields.is_empty() {
+        return Some(format!("{}: {}", tr("cam.local_required"), fields.join(" / ")));
+    }
+    sequence::validate_local(setup, operation).err().map(|error| format!("{}: {}", tr("cam.local_check"), error))
+}
+
+pub(super) fn first_local_issue(setup: &Setup) -> Option<(usize, String)> {
+    setup.operations.iter().enumerate().find_map(|(index, _)| local_issue(setup, index).map(|issue| (index, issue)))
 }
 
 fn local_settings(ui: &mut egui::Ui, setup: &mut Setup, index: usize) {
@@ -400,6 +513,9 @@ fn local_settings(ui: &mut egui::Ui, setup: &mut Setup, index: usize) {
         for (i, (name, mut cutting)) in candidates.into_iter().enumerate() {
             let r = ui_kit::button(ui, format!("{}: {}", tr("cam.groove_copy"), name), ui_kit::Button::Normal);
             crate::scenario::publish_rect(&format!("cam_groove_copy_{i}"), r.rect);
+            if r.enabled() && ui.is_rect_visible(r.rect) {
+                crate::scenario::publish_handle(&format!("cam_groove_copy_{i}"), r.rect.center());
+            }
             if r.clicked()
                 && let Some(op) = setup.operations.get_mut(index)
             {
@@ -413,17 +529,35 @@ fn local_settings(ui: &mut egui::Ui, setup: &mut Setup, index: usize) {
             }
         }
     }
-    let Some(op) = setup.operations.get_mut(index) else { return };
-    if op.cutting.is_none() && button(ui, "cam_local_configure", "cam.local_configure", true) {
-        op.cutting = default_cutting(kind);
+    if let Some(issue) = local_issue(setup, index) {
+        let response = ui.colored_label(Tokens::get().warning, issue);
+        crate::scenario::publish_rect("cam_local_issue", response.rect);
     }
+    if setup.operations.get(index).is_some_and(|operation| operation.cutting.is_none())
+        && button(ui, "cam_local_configure", "cam.local_configure", true)
+    {
+        let cutting = default_cutting(kind, setup);
+        if let Some(operation) = setup.operations.get_mut(index) {
+            operation.cutting = cutting;
+        }
+    }
+    let Some(op) = setup.operations.get_mut(index) else { return };
     let Some(cutting) = op.cutting.as_mut() else { return };
     ui.strong(tr("cam.local_geometry"));
     match cutting {
         Cutting::Contour(c) => {
-            ui.label(format!("輪郭点 {} → {}", c.first + 1, c.last + 1));
+            if let Some((first, last)) = c.profile_snapshot.get(c.first).zip(c.profile_snapshot.get(c.last)) {
+                ui.label(format!(
+                    "{}: Z {:.3} / Φ {:.3} → Z {:.3} / Φ {:.3}",
+                    tr("cam.range_saved"),
+                    first.z_mm,
+                    first.diameter_mm,
+                    last.z_mm,
+                    last.diameter_mm
+                ));
+            }
             ui.small(format!("残す取り代：片側 {:.3} / Z {:.3} mm", c.radial_leave_mm, c.axial_leave_mm));
-            ui.small("範囲や荒／仕上げを変える場合は、左の工具から新しい工程を作成します。");
+            ui.small(tr("cam.range_saved_help"));
             local_number(ui, "cam.path_depth", &mut c.depth_mm, 0.0..=100., " mm");
             local_number(ui, "cam.local_feed", &mut c.feed_mm_rev, 0.0..=10., " mm/rev");
         }
@@ -439,6 +573,9 @@ fn local_settings(ui: &mut egui::Ui, setup: &mut Setup, index: usize) {
             local_number(ui, "cam.local_feed", &mut d.feed_mm_rev, 0.0..=10., " mm/rev");
         }
         Cutting::OdGroove(g) => {
+            if kind == OperationKind::OdGrooveFinish {
+                ui.small(tr("cam.groove_finish_target"));
+            }
             local_number(ui, "cam.groove_front_z", &mut g.front_z_mm, -1e6..=0., " mm");
             local_number(ui, "cam.groove_width", &mut g.width_mm, 0.0..=1e6, " mm");
             local_number(ui, "cam.groove_bottom", &mut g.bottom_diameter_mm, 0.0..=1e6, " mm");

@@ -91,6 +91,39 @@ fn signed_output_roundtrips_every_planned_endpoint_and_feed_without_changing_all
 }
 
 #[test]
+fn mapped_nc_lines_skip_headers_approaches_and_unemitted_transfers() {
+    let s = setup();
+    let path = sequence::calculate(&s).unwrap();
+    for side in [XSide::Negative, XSide::Positive] {
+        let post = NlPost { x_side: side, ..Default::default() };
+        let program = review_program(&s, &post).unwrap();
+        assert_eq!(program.text, review_nc(&s, &post).unwrap());
+        assert_eq!(program.move_lines.len(), path.moves.len());
+        let lines: Vec<_> = program.text.lines().collect();
+        let mut used = std::collections::BTreeSet::new();
+        for (movement, line) in path.moves.iter().zip(program.move_lines) {
+            let Some(line) = line else {
+                assert_eq!(movement.phase, crate::machining::Phase::Transfer);
+                continue;
+            };
+            assert!(used.insert(line));
+            let block = lines[line];
+            assert_eq!(block.starts_with("G0X"), movement.motion == Motion::Rapid);
+            assert!((word(block, 'X') - side.coordinate(movement.to.diameter_mm)).abs() < 1e-8);
+            assert!((word(block, 'Z') - movement.to.z_mm).abs() < 1e-8);
+        }
+    }
+    let program = crate::machining::review_program(&path).unwrap();
+    let lines: Vec<_> = program.text.lines().collect();
+    assert_eq!(program.move_lines.len(), path.moves.len());
+    for (movement, line) in path.moves.iter().zip(program.move_lines) {
+        let block = lines[line.unwrap()];
+        assert_eq!(block.starts_with("G00"), movement.motion == Motion::Rapid);
+        assert!(block.starts_with("G00") || block.starts_with("G01"));
+    }
+}
+
+#[test]
 fn offsets_and_operation_spindle_overrides_are_explicit_and_bounded() {
     let mut s = setup();
     let mut post = NlPost { example_same_number_offsets: false, ..Default::default() };

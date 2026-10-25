@@ -50,7 +50,17 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui, origin: egui::Pos2) {
         crate::scenario::publish_rect(&id, response.rect);
         crate::scenario::publish_handle(&id, response.rect.center());
         if response.clicked() {
-            go(&mut app.turning_workspace, step);
+            let incomplete = (step == 4)
+                .then(|| {
+                    let setup = app.session.doc.turning.as_ref()?.setups.get(app.turning_workspace.setup)?;
+                    operations_ui::first_local_issue(setup).map(|(index, _)| index)
+                })
+                .flatten();
+            go(&mut app.turning_workspace, if incomplete.is_some() { 2 } else { step });
+            if let Some(index) = incomplete {
+                app.turning_workspace.operation = index;
+                app.turning_workspace.selection.editing = false;
+            }
         }
     }
 }
@@ -109,9 +119,23 @@ pub(super) fn settings(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut St
     });
     ui.add_space(10.0);
     if step != 4 {
-        let issue = plan.setups.get(state.setup).and_then(|setup| missing(setup, step));
-        if navigation(ui, state, step, issue) {
+        let incomplete = plan.setups.get(state.setup).filter(|_| step == 2).and_then(operations_ui::first_local_issue);
+        let issue = incomplete
+            .as_ref()
+            .and_then(|(index, issue)| {
+                let operation = plan.setups.get(state.setup)?.operations.get(*index)?;
+                Some(format!("{:02} {} — {}", index + 1, operation.name, issue))
+            })
+            .or_else(|| plan.setups.get(state.setup).and_then(|setup| missing(setup, step)).map(str::to_owned));
+        if navigation(ui, state, step, issue.as_deref()) {
             return;
+        }
+        if let Some((index, _)) = incomplete
+            && index != state.operation
+            && button(ui, "cam_operation_fix", "cam.local_fix_operation", true)
+        {
+            state.operation = index;
+            state.selection.editing = false;
         }
         ui.separator();
     }
@@ -120,7 +144,7 @@ pub(super) fn settings(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut St
     }
     if step == 2 {
         let Some(setup) = plan.setups.get_mut(state.setup) else { return };
-        if !super::operations_ui::selected(ui, setup, state) {
+        if !super::operations_ui::selected(ui, setup, state, revision) {
             return;
         }
         let r = controls::section(ui, tr("cam.operation_material_conditions"), |ui| {
@@ -329,7 +353,7 @@ pub(super) fn settings(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut St
                 ui.colored_label(Tokens::get().warning, tr("cam.path_stale"));
             }
             if let Some(error) = &state.machining.error {
-                ui.colored_label(Tokens::get().warning, error);
+                error_label(ui, error);
             }
         }
     }
@@ -345,7 +369,8 @@ pub(super) fn settings(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut St
 
 fn navigation(ui: &mut egui::Ui, state: &mut State, step: usize, issue: Option<&str>) -> bool {
     if let Some(key) = issue {
-        ui.label(tr(key));
+        let response = ui.colored_label(Tokens::get().warning, tr(key));
+        crate::scenario::publish_rect("cam_guide_issue", response.rect);
     }
     let previous = state.workflow;
     ui.horizontal(|ui| {

@@ -4,6 +4,53 @@
 
 ## Local turning CAM extension (2026-10-16)
 
+2026-10-25: integrated upstream `16286249` (0.22.0 and subsequent updates).
+The working tree based on `5a60736d` passes 80 CAM tests, including insert contact with
+OD/ID shoulders beyond a shortened cutting end; simulation retains the complete target.
+Tool-first hole/groove creation now opens compact confirmation, followed by dimension entry.
+Control timeout messages distinguish CAM reads, NC file writes and plan changes.
+The initial post-integration CAM UI tests pass (32), and the native 0.22.0 build and public-fixture UI
+checks confirm all four stages, old-file loading, nine-operation save/reopen, reset/Undo,
+CAD-camera preservation, NC/playback synchronization and contact-candidate stopping.
+The nine-operation fixture's NC is byte-identical to its independently audited earlier output.
+The final native rebuild also passes; screenshots confirm corrected operation highlighting,
+readable Japanese error reasons and completion of all 166 moves across nine operations.
+Its NC remains byte-identical. Before the follow-up fixes below, fmt, all-workspace/all-target
+Clippy with warnings denied, ui-containers and 13-crate Wasm checks passed (three upstream
+Wasm warnings remain), as did the CAM UI rerun (32), CAM (80), engine CAM (26), control-pending
+(4) and web-offline checks. Full CI was manually stopped after about 62 minutes; it did not
+complete. Kernel, IO, CAM, render, doc, sketch, icon and scenario suites passed, but GPU
+tests were stopped at about 15 GB private memory with four workers; a single-worker retry
+also remained incomplete after 11 minutes while UI GPU initialization overlapped.
+The unfinished long-running engine/UI cases were `seed_81` and
+`render_workspace::tests::progressive_image_controls_route_to_the_registered_host`.
+The final logs exposed translation registration/literal checks, a missing gallery example,
+a coordinate `Frame` misidentified by the UI-frame guard and a shared temporary-file race
+between two `mesh_convert` tests. Fixes register labels/reuse translations, add the gallery
+example, name the coordinate type `ModelFrame` and separate temporary filenames.
+After those fixes, CAM UI (32), localization (72), gallery (15; one existing evidence generator
+ignored), UI guards (15), and both mesh-export tests running concurrently pass. The remaining
+engine case `seed_81` passes individually. Final fmt/assets/lists/layers/ui-containers,
+all-workspace/all-target Clippy with warnings denied, and 13-crate Wasm checks also pass.
+The final native build succeeds in 2m33s; fresh screenshots and NC export confirm nine operations,
+166 completed moves, matching NC line 300, and the same audited NC hash. Full CI is not green:
+the Vulkan GPU suite and progressive UI GPU test remain incomplete.
+
+2026-10-23: integrated the upstream 0.20.0 UI containers and shared controls. The current
+CAM flow is four 2D stages, with stock-shortage regions and contextual validation,
+exact contour-range selection with decluttered points, and synchronized operation,
+simulation and NC-line review. Model-linked rectangular OD grooves retain their finished
+target while ordinary turning bridges the recess; drill/groove dimensions are checked
+against the model. Blind-hole residuals and model changes are checked, and all operations
+share validated stock/chuck placement. Machine-ready NC remains unverified, and automatic
+tool nose compensation is not implemented.
+
+### Development history
+
+The entries below record earlier implementation and validation, including the former 3D
+workspace. Their screen layouts and limitations may have been superseded by the current
+four-stage workflow described above and in [the CAM guide](docs/turning-cam.md).
+
 2026-10-21: independent decoding of exported review NC checks stepped OD/ID,
 drilling and OD groove allowances, feeds and nominal retracts against analytic
 dimensions. The NL reference differences and remaining machine checks are recorded

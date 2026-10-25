@@ -17,6 +17,7 @@ mod post_ui;
 mod selection_ui;
 mod simulation_ui;
 pub mod spatial;
+mod stock_ui;
 mod workflow_ui;
 pub use guided::toolbar;
 
@@ -44,6 +45,7 @@ pub struct State {
     flat: flat::View,
     reset_requested: bool,
     tool_click_frame: Option<u64>,
+    stock_check: Option<(u64, String, Result<cam::machining::selection::StockCoverage, String>)>,
 }
 
 impl Default for State {
@@ -71,12 +73,25 @@ impl Default for State {
             flat: flat::View::default(),
             reset_requested: false,
             tool_click_frame: None,
+            stock_check: None,
         }
     }
 }
 
 pub fn active(app: &SolveApp) -> bool {
     app.ui.tab == "TURNING"
+}
+
+/// Show the actionable CAM reason while retaining the complete diagnostic on hover.
+fn error_label(ui: &mut egui::Ui, error: &str) -> egui::Response {
+    let reason = error
+        .strip_prefix("invalid parameters for `")
+        .and_then(|rest| rest.split_once("`: "))
+        .filter(|(command, _)| command.starts_with("cam.turning.") || *command == "cam.tool_catalog.list")
+        .map_or(error, |(_, reason)| reason);
+    let reason = reason.strip_prefix("invalid turning plan: ").unwrap_or(reason);
+    let reason = if reason.is_empty() { error } else { reason };
+    ui.add(egui::Label::new(egui::RichText::new(reason).color(Tokens::get().warning)).wrap()).on_hover_text(error)
 }
 
 /// Shared by the workspace menu and the control channel.
@@ -162,9 +177,19 @@ fn text(ui: &mut egui::Ui, key: &str, value: &mut String) {
 }
 
 fn stock_fields(ui: &mut egui::Ui, stock: &mut Stock) {
-    number(ui, "cam.stock_od", &mut stock.outer_diameter_mm);
-    number(ui, "cam.stock_id", &mut stock.inner_diameter_mm);
-    number(ui, "cam.stock_length", &mut stock.length_mm);
+    ui_kit::scope(ui, |ui| {
+        for (key, value) in [
+            ("cam.stock_od", &mut stock.outer_diameter_mm),
+            ("cam.stock_id", &mut stock.inner_diameter_mm),
+            ("cam.stock_length", &mut stock.length_mm),
+        ] {
+            ui_kit::row(ui, tr(key), |ui| {
+                let r = ui_kit::number_field(ui, value, 0.0..=1e6, 0.1, " mm");
+                crate::scenario::publish_rect(key, r.rect);
+                crate::scenario::publish_handle(key, r.rect.center());
+            });
+        }
+    });
 }
 
 fn next_id(plan: &TurningPlan, prefix: &str) -> String {
@@ -435,10 +460,12 @@ pub fn panels(app: &mut SolveApp, ui: &mut egui::Ui) {
     let mut state = std::mem::take(&mut app.turning_workspace);
     let original = app.session.doc.turning.clone();
     let mut plan = original.as_deref().cloned();
+    stock_ui::refresh(plan.as_ref(), &mut state, app.session.revision);
     let bodies: Vec<String> = app.session.world_state().bodies.iter().map(|b| b.name.clone()).collect();
-    let frame = egui::Frame::NONE.fill(Tokens::get().panel).inner_margin(12);
+    let container = ui_kit::Container::new(ui.ctx(), ui_kit::Surface::Panel);
+    let frame = container.frame(ui.ctx(), Tokens::get().panel, crate::frame::Side::Left).inner_margin(12);
     if state.advanced {
-        egui::Panel::left("sc_turning_outline").exact_size(260.0).resizable(false).frame(frame).show(ui, |ui| {
+        container.edge("sc_turning_outline", ui_kit::Edge::Left).exact_size(260.0).resizable(false).frame(frame).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 if let Some(plan) = &mut plan {
                     state.setup = state.setup.min(plan.setups.len().saturating_sub(1));
@@ -468,7 +495,7 @@ pub fn panels(app: &mut SolveApp, ui: &mut egui::Ui) {
             });
         });
         if let Some(plan) = &mut plan {
-            egui::Panel::right("sc_turning_inspector").exact_size(350.0).resizable(false).frame(frame).show(ui, |ui| {
+            container.edge("sc_turning_inspector", ui_kit::Edge::Right).exact_size(350.0).resizable(false).frame(frame).show(ui, |ui| {
                 egui::ScrollArea::vertical().id_salt((state.advanced, state.workflow, state.section, state.operation_draft.is_some())).show(
                     ui,
                     |ui| {
@@ -489,7 +516,7 @@ pub fn panels(app: &mut SolveApp, ui: &mut egui::Ui) {
                         }
                         if let Some(error) = &state.error {
                             ui.separator();
-                            ui.label(error);
+                            error_label(ui, error);
                         }
                     },
                 );

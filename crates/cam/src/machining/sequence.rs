@@ -3,6 +3,10 @@
 use super::*;
 use crate::{OperationKind as K, Setup};
 
+mod target;
+pub(crate) use target::model_linked;
+pub(super) use target::{check_drill_target, turning_job, turning_points};
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
@@ -34,7 +38,7 @@ impl Default for Drill {
     }
 }
 impl Drill {
-    fn diameter_at(&self, z: f64) -> f64 {
+    pub(crate) fn diameter_at(&self, z: f64) -> f64 {
         ((z - self.tip_end_z_mm) * (self.point_angle_rad * 0.5).tan() * 2.).clamp(0., self.diameter_mm)
     }
     pub fn point_length(&self) -> f64 {
@@ -147,6 +151,44 @@ pub fn local(kind: K) -> bool {
     matches!(kind, K::CenterDrill | K::Drill | K::OdGrooveRough | K::OdGrooveFinish)
 }
 
+/// Validate an unfinished local operation before leaving its settings page.
+/// Ordering, prior stock and finish-after-rough requirements are checked by the full planner.
+pub fn validate_local(setup: &Setup, operation: &crate::Operation) -> Result<()> {
+    if !local(operation.kind) {
+        return Ok(());
+    }
+    for job in setup.od_job.iter().chain(&setup.id_job) {
+        job.validate_draft()?;
+    }
+    if let Some(drawing) = &setup.drawing {
+        drawing.validate()?;
+    }
+    let cutting = operation.cutting.as_ref().ok_or_else(|| PlanError("加工寸法・送りを設定してください".into()))?;
+    cutting.validate_draft(operation.kind)?;
+    let stock = setup.stock.as_ref().ok_or_else(|| PlanError("材料寸法を設定してください".into()))?;
+    let l = limits(setup)?;
+    match cutting {
+        Cutting::Drill(d) => {
+            check_drill_target(setup, d)?;
+            drill_parameters(d, stock, &l)?;
+        }
+        Cutting::OdGroove(g) => {
+            groove_parameters(g, operation.kind == K::OdGrooveFinish, setup, stock, &l)?;
+            if operation.kind == K::OdGrooveFinish
+                && !setup
+                    .operations
+                    .iter()
+                    .take_while(|o| o.id != operation.id)
+                    .any(|o| o.kind == K::OdGrooveRough && matches!(&o.cutting, Some(Cutting::OdGroove(r)) if same_groove(r, g)))
+            {
+                return invalid("同じ寸法・仕上げ代の溝荒取りを先に配置してください");
+            }
+        }
+        Cutting::Contour(_) => return invalid("穴・溝の加工寸法を設定してください"),
+    }
+    Ok(())
+}
+
 /// Axial midpoint approximation, using the actual nominal drill cone or groove width.
 /// No triangular turning insert is substituted for these different cutter types.
 pub fn remove_local(slabs: &mut [crate::simulation::Slab], a: ProfilePoint, b: ProfilePoint, cutting: &Cutting) {
@@ -170,7 +212,20 @@ pub fn remove_local(slabs: &mut [crate::simulation::Slab], a: ProfilePoint, b: P
     }
 }
 
+/// Resolve and validate only shared placement, independently of unfinished cutting dimensions
+/// or feeds. OD/ID jobs take precedence over local operations' saved placement snapshots.
+pub fn shared_limits(setup: &Setup) -> Result<Limits> {
+    limits(setup)
+}
+
 pub(super) fn limits(setup: &Setup) -> Result<Limits> {
+    if let Some((od, id)) = setup.od_job.as_ref().zip(setup.id_job.as_ref())
+        && [(od.stock_front_z_mm, id.stock_front_z_mm), (od.chuck_front_z_mm, id.chuck_front_z_mm), (od.clearance_mm, id.clearance_mm)]
+            .iter()
+            .any(|(a, b)| !a.is_finite() || !b.is_finite() || (a - b).abs() > EPS)
+    {
+        return invalid("外径・内径の材料前端・チャック前端・退避を同じ共通配置に設定してください");
+    }
     let l = if let Some(j) = setup.od_job.as_ref().or(setup.id_job.as_ref()) {
         Limits { stock_front_z_mm: j.stock_front_z_mm, chuck_front_z_mm: j.chuck_front_z_mm, clearance_mm: j.clearance_mm }
     } else {
@@ -182,13 +237,14 @@ pub(super) fn limits(setup: &Setup) -> Result<Limits> {
             .limits()
             .clone()
     };
+    bounded("stock front Z", l.stock_front_z_mm, 0., 1e6)?;
     bounded("clearance", l.clearance_mm, 0.01, 1000.)?;
     bounded("chuck front", l.chuck_front_z_mm, -1e6, -0.001)?;
     for c in setup.operations.iter().filter_map(|o| o.cutting.as_ref()).filter(|_| setup.od_job.is_none() && setup.id_job.is_none()) {
         let b = c.limits();
         if [(l.stock_front_z_mm, b.stock_front_z_mm), (l.chuck_front_z_mm, b.chuck_front_z_mm), (l.clearance_mm, b.clearance_mm)]
             .iter()
-            .any(|(a, b)| (a - b).abs() > EPS)
+            .any(|(a, b)| !a.is_finite() || !b.is_finite() || (a - b).abs() > EPS)
         {
             return invalid("all operations must share stock front Z, chuck front Z and clearance");
         }
@@ -196,7 +252,7 @@ pub(super) fn limits(setup: &Setup) -> Result<Limits> {
     Ok(l)
 }
 
-pub(super) fn drill_moves(d: &Drill, kind: K, stock: &Stock, l: &Limits) -> Result<Vec<Move>> {
+fn drill_parameters(d: &Drill, stock: &Stock, l: &Limits) -> Result<usize> {
     bounded("drill diameter", d.diameter_mm, 0.01, stock.outer_diameter_mm - 0.001)?;
     bounded("drill feed", d.feed_mm_rev, 0.001, 10.)?;
     if d.tip_end_z_mm >= l.stock_front_z_mm - EPS || d.tip_end_z_mm < l.chuck_front_z_mm + l.clearance_mm {
@@ -205,6 +261,11 @@ pub(super) fn drill_moves(d: &Drill, kind: K, stock: &Stock, l: &Limits) -> Resu
     let distance = l.stock_front_z_mm - d.tip_end_z_mm;
     let count = if d.peck_mm > 0. { (distance / d.peck_mm).ceil() } else { 1. };
     bounded("drill pecks", count, 1., 2000.)?;
+    Ok(count as usize)
+}
+
+pub(super) fn drill_moves(d: &Drill, kind: K, stock: &Stock, l: &Limits) -> Result<Vec<Move>> {
+    let count = drill_parameters(d, stock, l)?;
     let safe = ProfilePoint { diameter_mm: 0., z_mm: l.stock_front_z_mm + l.clearance_mm };
     let mut b = Builder {
         moves: vec![],
@@ -214,7 +275,7 @@ pub(super) fn drill_moves(d: &Drill, kind: K, stock: &Stock, l: &Limits) -> Resu
         phase: if kind == K::CenterDrill { Phase::CenterDrill } else { Phase::Drill },
         feed: d.feed_mm_rev,
     };
-    for n in 1..=count as usize {
+    for n in 1..=count {
         let z = if d.peck_mm > 0. { (l.stock_front_z_mm - n as f64 * d.peck_mm).max(d.tip_end_z_mm) } else { d.tip_end_z_mm };
         b.go(ProfilePoint { z_mm: z, ..safe }, Motion::Feed)?;
         b.go(safe, Motion::Rapid)?;
@@ -234,9 +295,12 @@ pub(super) fn same_groove(a: &Groove, b: &Groove) -> bool {
     .all(|(a, b)| (a - b).abs() < EPS)
 }
 
-pub(super) fn groove_moves(g: &Groove, finish: bool, setup: &Setup, stock: &Stock, l: &Limits) -> Result<Vec<Move>> {
+fn groove_parameters(g: &Groove, finish: bool, setup: &Setup, stock: &Stock, l: &Limits) -> Result<()> {
     bounded("groove width", g.width_mm, 0.001, stock.length_mm)?;
-    bounded("groove tool width", g.tool_width_mm, 0.001, g.width_mm - 2. * g.axial_leave_mm)?;
+    // Roughing keeps both wall allowances; finishing may use a tool spanning the
+    // final width because its nominal front edge runs exactly between the walls.
+    let cutting_width = g.width_mm - if finish { 0. } else { 2. * g.axial_leave_mm };
+    bounded("groove tool width", g.tool_width_mm, 0.001, cutting_width)?;
     bounded("groove step", g.radial_depth_mm, 0.001, 100.)?;
     bounded("groove feed", g.feed_mm_rev, 0.001, 10.)?;
     let back = g.front_z_mm - g.width_mm;
@@ -245,6 +309,14 @@ pub(super) fn groove_moves(g: &Groove, finish: bool, setup: &Setup, stock: &Stoc
     }
     let mut outer = stock.outer_diameter_mm;
     let mut inner = stock.inner_diameter_mm;
+    // A later drill cannot restore the wall removed by an earlier groove. Check final
+    // local intent as well as the bore present at this point in the operation replay.
+    for cutting in setup.operations.iter().filter_map(|o| o.cutting.as_ref()) {
+        if let Cutting::Drill(d) = cutting {
+            inner = inner.max(d.diameter_at(g.front_z_mm));
+        }
+    }
+    let model_groove = target::groove_land(setup, g)?;
     for (job, is_inner) in [(setup.od_job.as_ref(), false), (setup.id_job.as_ref(), true)] {
         if let Some(job) = job {
             let zs = [g.front_z_mm, back].into_iter().chain(job.profile.iter().filter(|p| p.z_mm >= back && p.z_mm <= g.front_z_mm).map(|p| p.z_mm));
@@ -252,16 +324,31 @@ pub(super) fn groove_moves(g: &Groove, finish: bool, setup: &Setup, stock: &Stoc
                 let d = diameter_at(&job.profile, z).ok_or_else(|| PlanError("groove must be inside the configured profile extent".into()))?;
                 if is_inner {
                     inner = inner.max(d);
-                } else {
+                } else if model_groove.is_none() {
                     outer = outer.min(d);
                 }
             }
         }
     }
+    if let Some(land) = model_groove {
+        outer = outer.min(land);
+    }
     bounded("groove bottom diameter", g.bottom_diameter_mm, inner + 0.001, outer - 2. * g.radial_leave_mm - 0.001)?;
     if g.radial_leave_mm > g.radial_depth_mm || g.axial_leave_mm > g.tool_width_mm * 0.5 {
         return invalid("groove finishing allowance exceeds the allowed pass engagement");
     }
+    if setup.cut_end_z_mm.is_some_and(|end| back < end - EPS) {
+        return invalid("溝が共通の加工終端より奥にあります");
+    }
+    let columns = ((g.width_mm - 2. * g.axial_leave_mm - g.tool_width_mm) / (g.tool_width_mm * 0.8)).ceil().max(1.);
+    let layers = ((stock.outer_diameter_mm - g.bottom_diameter_mm - 2. * g.radial_leave_mm) / (2. * g.radial_depth_mm)).ceil().max(1.);
+    bounded("groove passes", (columns + 1.) * layers, 1., 4000.)?;
+    Ok(())
+}
+
+pub(super) fn groove_moves(g: &Groove, finish: bool, setup: &Setup, stock: &Stock, l: &Limits) -> Result<Vec<Move>> {
+    groove_parameters(g, finish, setup, stock, l)?;
+    let back = g.front_z_mm - g.width_mm;
     let safe = ProfilePoint { z_mm: l.stock_front_z_mm + l.clearance_mm, diameter_mm: stock.outer_diameter_mm + 2. * l.clearance_mm };
     let mut b = Builder {
         moves: vec![],
@@ -302,9 +389,16 @@ pub fn calculate(setup: &Setup) -> Result<Toolpath> {
     if setup.operations.iter().any(|o| matches!(o.cutting, Some(Cutting::Contour(_)))) {
         return super::selection::calculate(setup);
     }
+    if let Some(job) = &setup.od_job
+        && turning_job(job)?.profile != job.profile
+    {
+        // Selection planning retains the exact target and replays the separate local cuts.
+        return super::selection::calculate(setup);
+    }
     let mut plan = crate::TurningPlan::nl2500();
     plan.setups = vec![setup.clone()];
     plan.validate()?;
+    super::selection::require_covered(setup)?;
     if setup.previous_setup.is_some() {
         return invalid("regrip stock transfer is not supported");
     }
@@ -345,23 +439,13 @@ pub fn calculate(setup: &Setup) -> Result<Toolpath> {
             return Err(PlanError(format!("{}: 加工寸法・送りを設定してください", op.name)));
         }
         if let Some(Cutting::Drill(d)) = &op.cutting {
+            check_drill_target(setup, d)?;
             drill_moves(d, op.kind, stock, &l)?;
             if index < id_start
                 && op.kind == K::Drill
                 && id.as_ref().and_then(|j| j.profile.last()).is_some_and(|p| d.full_diameter_z() <= p.z_mm + EPS)
             {
                 bored.inner_diameter_mm = bored.inner_diameter_mm.max(d.diameter_mm);
-            }
-            // A subsequent smaller drill/boring target cannot restore removed material.
-            for (j, outer) in od.iter().map(|j| (j, true)).chain(id.iter().map(|j| (j, false))) {
-                let transition =
-                    diameter_at(&j.profile, d.full_diameter_z()).map(|diameter_mm| ProfilePoint { z_mm: d.full_diameter_z(), diameter_mm });
-                for p in j.profile.iter().chain(transition.iter()) {
-                    let cut = d.diameter_at(p.z_mm);
-                    if (outer && cut >= p.diameter_mm - EPS) || (!outer && cut > p.diameter_mm + EPS) {
-                        return invalid("drill cone/cylinder intersects the finished profile");
-                    }
-                }
             }
         }
     }
@@ -469,14 +553,22 @@ pub fn calculate(setup: &Setup) -> Result<Toolpath> {
             "穴あけは先端Z基準、外径溝は工具の手前側刃先Z基準。ドリル形状は円すい＋円筒、溝工具は角形の近似。刃先R補正・実工具干渉は未検証。".into(),
             "除去体積の集計は従来の輪郭加工分のみ。穴あけ・溝を含む残材はシミュレーションで確認してください。".into(),
         ];
+        if !model_linked(setup) {
+            path.warnings.push("手入力の穴・溝寸法を完成形状の指定として使用しています。モデル形状との一致は検証されていません。".into());
+        }
     }
     Ok(path)
 }
 
 pub fn review_nc(setup: &Setup) -> Result<String> {
+    review_program(setup).map(|program| program.text)
+}
+
+pub fn review_program(setup: &Setup) -> Result<crate::post::ReviewProgram> {
     let path = calculate(setup)?;
-    let mut text = String::from(
+    let mut text = crate::post::ReviewWriter::new(
         "%\nO9001 (SOLIDCRAFT REVIEW ONLY)\nM30\n(DISARMED - NOT MACHINE READY)\n(X DIAMETER MM / ABSOLUTE Z / F MM PER REV)\n(NO TOOL CALLS SPINDLE MODES OFFSETS OR NOSE COMPENSATION)\n",
+        path.moves.len(),
     );
     if let Some(first) = path.moves.first() {
         text.push_str(&format!("(REQUIRED START X{:.4} Z{:.4})\n", first.from.diameter_mm, first.from.z_mm));
@@ -499,6 +591,7 @@ pub fn review_nc(setup: &Setup) -> Result<String> {
         }
         // Nine decimals keep review quantization below one nanometre. This fragment is
         // deliberately disarmed; controller-specific rounding/compensation is not certified.
+        text.mark_move(index)?;
         if m.motion == Motion::Rapid {
             if (m.from.diameter_mm - m.to.diameter_mm).abs() > EPS {
                 text.push_str(&format!("G00 X{:.9}\n", m.to.diameter_mm));
@@ -510,7 +603,7 @@ pub fn review_nc(setup: &Setup) -> Result<String> {
         }
     }
     text.push_str("M30\n%\n");
-    Ok(text)
+    Ok(text.finish())
 }
 
 #[cfg(test)]

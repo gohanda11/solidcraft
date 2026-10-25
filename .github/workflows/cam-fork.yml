@@ -40,6 +40,7 @@ jobs:
       - run: cargo xtask assets
       - run: cargo xtask lists
       - run: cargo xtask layers
+      - run: cargo xtask ui-containers
       - run: cargo clippy --profile ci -p solidcraft-cam -p solidcraft-engine -p solidcraft-ui-egui --all-targets -- -D warnings
       - run: cargo test --profile ci -p solidcraft-cam --lib
       - run: cargo test --profile ci -p solidcraft-engine --lib cmd::cam

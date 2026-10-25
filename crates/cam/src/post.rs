@@ -5,6 +5,41 @@ use serde::{Deserialize, Serialize};
 use crate::machining::{Motion, sequence};
 use crate::{OperationKind as K, Result, Setup, invalid};
 
+/// Review text and its exact planner-to-output correspondence. Indices are zero-based.
+/// A missing entry means that move is not emitted by this dialect (for example an NL transfer).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReviewProgram {
+    pub text: String,
+    pub move_lines: Vec<Option<usize>>,
+}
+
+pub(crate) struct ReviewWriter {
+    program: ReviewProgram,
+    line: usize,
+}
+impl ReviewWriter {
+    pub(crate) fn new(header: &str, moves: usize) -> Self {
+        let mut writer = Self { program: ReviewProgram { text: String::new(), move_lines: vec![None; moves] }, line: 0 };
+        writer.push_str(header);
+        writer
+    }
+    pub(crate) fn push_str(&mut self, text: &str) {
+        self.line += text.bytes().filter(|b| *b == b'\n').count();
+        self.program.text.push_str(text);
+    }
+    pub(crate) fn mark_move(&mut self, index: usize) -> Result<()> {
+        let Some(line) = self.program.move_lines.get_mut(index) else { return invalid("NC move mapping is out of range") };
+        if line.is_some() {
+            return invalid("NC move has more than one output line");
+        }
+        *line = Some(self.line);
+        Ok(())
+    }
+    pub(crate) fn finish(self) -> ReviewProgram {
+        self.program
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum XSide {
@@ -133,12 +168,19 @@ fn operation_label(kind: K) -> &'static str {
 /// Always begins with M30 before any state change, including tool calls and auxiliary blocks.
 /// Export never trusts a cached path and never copies coordinates from the reference NC.
 pub fn review_nc(setup: &Setup, post: &NlPost) -> Result<String> {
+    review_program(setup, post).map(|program| program.text)
+}
+
+pub fn review_program(setup: &Setup, post: &NlPost) -> Result<ReviewProgram> {
     post.validate()?;
     let path = sequence::calculate(setup)?;
-    let mut text = format!(
-        "%\nO{:04} (SOLIDCRAFT NL SAMPLE REVIEW)\nM30\n(DISARMED - NOT MACHINE READY)\n(NOMINAL TIP - NO NOSE COMPENSATION)\n(X SIGN {} / DIAMETER MM / ABSOLUTE X Z / F MM PER REV)\n(TOOL CHANGE APPROACH AND MACHINE RETURN ARE NOT VERIFIED)\n",
-        post.program_number,
-        if post.x_side == XSide::Negative { "NEGATIVE" } else { "POSITIVE" }
+    let mut text = ReviewWriter::new(
+        &format!(
+            "%\nO{:04} (SOLIDCRAFT NL SAMPLE REVIEW)\nM30\n(DISARMED - NOT MACHINE READY)\n(NOMINAL TIP - NO NOSE COMPENSATION)\n(X SIGN {} / DIAMETER MM / ABSOLUTE X Z / F MM PER REV)\n(TOOL CHANGE APPROACH AND MACHINE RETURN ARE NOT VERIFIED)\n",
+            post.program_number,
+            if post.x_side == XSide::Negative { "NEGATIVE" } else { "POSITIVE" }
+        ),
+        path.moves.len(),
     );
     if post.example_m86_m85 {
         text.push_str("M86\n");
@@ -168,7 +210,7 @@ pub fn review_nc(setup: &Setup, post: &NlPost) -> Result<String> {
             }
             *seen = true;
             let Some(movement) = path.moves.get(index) else { return invalid("NC move index is invalid") };
-            moves.push(movement);
+            moves.push((index, movement));
         }
         if moves.is_empty() {
             text.push_str(&format!("\n(N{} {} - NO MATERIAL TO REMOVE)\n", number + 1, operation_label(operation.kind)));
@@ -200,15 +242,16 @@ pub fn review_nc(setup: &Setup, post: &NlPost) -> Result<String> {
             SpeedMode::SurfaceSpeed => text.push_str(&format!("G96S{:.3}M3\n", spindle.speed)),
             SpeedMode::Rpm => text.push_str(&format!("G97S{:.0}M3\n", spindle.speed.min(f64::from(spindle.max_rpm)))),
         }
-        let Some(first) = moves.first() else { return invalid("NC operation is empty") };
+        let Some((_, first)) = moves.first() else { return invalid("NC operation is empty") };
         text.push_str(&format!(
             "(REQUIRED SAFE APPROACH - VERIFY)\nG0X{:.9}Z{:.9}\n",
             post.x_side.coordinate(first.from.diameter_mm),
             first.from.z_mm
         ));
-        for movement in moves {
+        for (index, movement) in moves {
             let x = post.x_side.coordinate(movement.to.diameter_mm);
             let z = movement.to.z_mm;
+            text.mark_move(index)?;
             match movement.motion {
                 Motion::Rapid => text.push_str(&format!("G0X{x:.9}Z{z:.9}\n")),
                 Motion::Feed => {
@@ -241,7 +284,7 @@ pub fn review_nc(setup: &Setup, post: &NlPost) -> Result<String> {
         text.push_str("(EXAMPLE M85 OMITTED - MACHINE FUNCTION UNCONFIRMED)\n");
     }
     text.push_str("M30\n%\n");
-    Ok(text)
+    Ok(text.finish())
 }
 
 #[cfg(test)]

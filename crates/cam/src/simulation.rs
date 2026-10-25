@@ -194,19 +194,77 @@ fn profile_radius(points: &[ProfilePoint], z: f64) -> Option<f64> {
         Some((a.diameter_mm + (b.diameter_mm - a.diameter_mm) * (z - a.z_mm) / (b.z_mm - a.z_mm)) * 0.5)
     })
 }
-fn finished_band(path: &Toolpath, z: f64) -> Option<[f64; 2]> {
+fn finished_band(setup: &Setup, path: &Toolpath, z: f64) -> Option<[f64; 2]> {
     if z > 0. {
         return None;
     }
-    let (od, id) = if path.inner {
-        (path.stock.outer_diameter_mm * 0.5, profile_radius(&path.job.profile, z)?)
+    let model = crate::machining::sequence::model_linked(setup);
+    // Whole-profile planning clips its job at the requested cutting end. The cutter
+    // can extend beyond that end, so collision targets must use the complete saved
+    // section; only the nominal path, not the finished part, has been shortened.
+    let (mut od, mut id) = if path.inner {
+        (path.stock.outer_diameter_mm * 0.5, profile_radius(setup.id_job.as_ref().map_or(path.job.profile.as_slice(), |j| j.profile.as_slice()), z)?)
     } else {
         (
-            profile_radius(&path.job.profile, z)?,
-            path.id_path.as_ref().and_then(|p| profile_radius(&p.job.profile, z)).unwrap_or(path.stock.inner_diameter_mm * 0.5),
+            profile_radius(setup.od_job.as_ref().map_or(path.job.profile.as_slice(), |j| j.profile.as_slice()), z)?,
+            setup
+                .id_job
+                .as_ref()
+                .map(|j| j.profile.as_slice())
+                .or_else(|| path.id_path.as_ref().map(|p| p.job.profile.as_slice()))
+                .and_then(|points| profile_radius(points, z))
+                .unwrap_or_else(|| {
+                    if model {
+                        setup.drawing.as_ref().and_then(|d| profile_radius(&d.inner, z)).unwrap_or(0.)
+                    } else {
+                        path.stock.inner_diameter_mm * 0.5
+                    }
+                }),
         )
     };
+    if !model {
+        // Legacy manual local dimensions are an explicit target amendment. Model-linked
+        // targets are never changed by an operation that would cut beyond the model.
+        for c in setup.operations.iter().filter_map(|o| o.cutting.as_ref()) {
+            match c {
+                crate::machining::sequence::Cutting::Drill(d) => id = id.max(d.diameter_at(z) * 0.5),
+                crate::machining::sequence::Cutting::OdGroove(g) if z <= g.front_z_mm && z >= g.front_z_mm - g.width_mm => {
+                    od = od.min(g.bottom_diameter_mm * 0.5);
+                }
+                _ => {}
+            }
+        }
+    }
     Some([id, od])
+}
+
+/// Continuous nominal cutter section swept by a local axis-aligned motion.
+/// Groove height is unknown: only the material-facing radial cutting half-line is tested.
+fn local_section(cutting: &crate::machining::sequence::Cutting, a: ProfilePoint, b: ProfilePoint, z: f64) -> Option<[f64; 2]> {
+    use crate::machining::sequence::Cutting;
+    match cutting {
+        Cutting::Drill(d) if z >= a.z_mm.min(b.z_mm) => {
+            Some([0., ((z - a.z_mm.min(b.z_mm)) * (d.point_angle_rad * 0.5).tan()).min(d.diameter_mm * 0.5)])
+        }
+        Cutting::OdGroove(g) if z >= a.z_mm.min(b.z_mm) - g.tool_width_mm && z <= a.z_mm.max(b.z_mm) => {
+            Some([a.diameter_mm.min(b.diameter_mm) * 0.5, f64::INFINITY])
+        }
+        _ => None,
+    }
+}
+
+fn local_contact_pose(cutting: &crate::machining::sequence::Cutting, a: ProfilePoint, b: ProfilePoint, z: f64, band: [f64; 2]) -> ProfilePoint {
+    let at = |t: f64| ProfilePoint { z_mm: a.z_mm + (b.z_mm - a.z_mm) * t, diameter_mm: a.diameter_mm + (b.diameter_mm - a.diameter_mm) * t };
+    let (mut lo, mut hi) = (0., 1.);
+    for _ in 0..14 {
+        let mid = (lo + hi) * 0.5;
+        if local_section(cutting, a, at(mid), z).is_some_and(|cut| band[1].min(cut[1]) - band[0].max(cut[0]) > 1e-8) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    at(hi)
 }
 
 /// Locate a candidate within this move at one sampled axial section. The returned pose is
@@ -243,6 +301,9 @@ pub fn simulate(setup: &Setup, path: &Toolpath, resolution: f64) -> Result<Simul
     if let Some(id) = &path.id_path {
         id.job.validate_draft()?;
     }
+    for job in setup.od_job.iter().chain(&setup.id_job) {
+        job.validate_draft()?;
+    }
     if !path.stock.length_mm.is_finite()
         || path.stock.length_mm <= 0.
         || !path.stock.outer_diameter_mm.is_finite()
@@ -269,16 +330,44 @@ pub fn simulate(setup: &Setup, path: &Toolpath, resolution: f64) -> Result<Simul
     }
     let front = path.job.stock_front_z_mm;
     let back = front - path.stock.length_mm;
-    let mut stock: Vec<_> = (0..count)
-        .map(|i| Slab {
-            z0: back + i as f64 * resolution,
-            z1: (back + (i + 1) as f64 * resolution).min(front),
-            inner: path.stock.inner_diameter_mm * 0.5,
-            outer: path.stock.outer_diameter_mm * 0.5,
+    let mut zs: Vec<_> = (0..=count).map(|i| (back + i as f64 * resolution).min(front)).collect();
+    zs.push(0.);
+    zs.extend(path.job.profile.iter().map(|p| p.z_mm));
+    if let Some(id) = &path.id_path {
+        zs.extend(id.job.profile.iter().map(|p| p.z_mm));
+    }
+    for job in setup.od_job.iter().chain(&setup.id_job) {
+        zs.extend(job.profile.iter().map(|p| p.z_mm));
+    }
+    if let Some(drawing) = &setup.drawing {
+        drawing.validate()?;
+        zs.extend(drawing.inner.iter().map(|p| p.z_mm));
+    }
+    for c in setup.operations.iter().filter_map(|o| o.cutting.as_ref()) {
+        match c {
+            crate::machining::sequence::Cutting::OdGroove(g) => {
+                zs.extend([g.front_z_mm, g.front_z_mm - g.width_mm, g.front_z_mm - g.axial_leave_mm, g.front_z_mm - g.width_mm + g.axial_leave_mm])
+            }
+            crate::machining::sequence::Cutting::Drill(d) => zs.extend([d.tip_end_z_mm, d.full_diameter_z()]),
+            _ => {}
+        }
+    }
+    zs.retain(|z| z.is_finite() && *z >= back && *z <= front);
+    zs.sort_by(f64::total_cmp);
+    zs.dedup_by(|a, b| (*a - *b).abs() < 1e-8);
+    if zs.len() > 4097 {
+        return invalid("simulation section boundary limit");
+    }
+    let mut stock: Vec<_> = zs
+        .windows(2)
+        .filter_map(|w| {
+            let [a, b] = w else { return None };
+            Some(Slab { z0: *a, z1: *b, inner: path.stock.inner_diameter_mm * 0.5, outer: path.stock.outer_diameter_mm * 0.5 })
         })
         .collect();
+    let count = stock.len();
     let mut bands: Vec<Vec<[f64; 2]>> = stock.iter().map(|s| vec![[s.inner, s.outer]]).collect();
-    let mut report=Simulation{band_edits:vec![],insert_stations:vec![],nominal_stations:vec![],resolution_mm:resolution,initial:stock.clone(),edits:vec![],contacts:vec![],missing_stations:vec![],checked_stations:vec![],unchecked_moves:0,contact_list_truncated:false,machine_ready:false,scope:"axial midpoint slices; optional rounded-triangle swept section without nose compensation; holder checks use pre-move stock envelopes; assumed insert dimensions, flank clearance, turret, jaws, tool changes and machine axes are not verified".into()};
+    let mut report=Simulation{band_edits:vec![],insert_stations:vec![],nominal_stations:vec![],resolution_mm:resolution,initial:stock.clone(),edits:vec![],contacts:vec![],missing_stations:vec![],checked_stations:vec![],unchecked_moves:0,contact_list_truncated:false,machine_ready:false,scope:"axial midpoint slices; nominal drill cone/cylinder and rectangular groove cutting width (not verified physical cutter geometry); optional rounded-triangle swept section without nose compensation; holder checks use pre-move stock envelopes; assumed insert dimensions, flank clearance, turret, jaws, tool changes and machine axes are not verified".into()};
     let mut work = 0usize;
     let mut section_work = 0usize;
     for (index, m) in path.moves.iter().enumerate() {
@@ -314,7 +403,7 @@ pub fn simulate(setup: &Setup, path: &Toolpath, resolution: f64) -> Result<Simul
         let length = (m.to.z_mm - m.from.z_mm).abs().max((m.to.diameter_mm - m.from.diameter_mm).abs() * 0.5);
         // Insert cutting uses one continuous swept polygon. With no checked holder there
         // is no sampled work here; smaller cutting depths must not waste the work budget.
-        let steps = if outline.is_some() && holder.is_none() { 1 } else { (length / resolution).ceil().max(1.) as usize };
+        let steps = if (outline.is_some() || cutting.is_some()) && holder.is_none() { 1 } else { (length / resolution).ceil().max(1.) as usize };
         work = work.saturating_add(steps.saturating_mul(count));
         if steps > 100_000 || work > 20_000_000 {
             return invalid("simulation work limit; use a coarser resolution or a shorter range");
@@ -385,7 +474,7 @@ pub fn simulate(setup: &Setup, path: &Toolpath, resolution: f64) -> Result<Simul
                     }
                     if m.motion == Motion::Feed {
                         if gouge.is_none()
-                            && let Some(target) = finished_band(path, z)
+                            && let Some(target) = finished_band(setup, path, z)
                             && let (Some(outline), Some(band)) = (
                                 outline.as_ref(),
                                 remaining.iter().find(|b| b[1].min(cut[1]).min(target[1]) - b[0].max(cut[0]).max(target[0]) > 0.002),
@@ -393,6 +482,26 @@ pub fn simulate(setup: &Setup, path: &Toolpath, resolution: f64) -> Result<Simul
                         {
                             gouge =
                                 Some(insert_contact_pose(outline, m.from, m.to, z, [band[0].max(target[0]) + 0.001, band[1].min(target[1]) - 0.001]));
+                        }
+                        crate::insert::subtract(remaining, cut);
+                    }
+                }
+            } else if let Some(cutting) = cutting {
+                let z = (s.z0 + s.z1) * 0.5;
+                if let Some(cut) = local_section(cutting, m.from, m.to, z) {
+                    if m.motion == Motion::Rapid {
+                        if insert_rapid.is_none()
+                            && let Some(band) = remaining.iter().find(|b| b[1].min(cut[1]) - b[0].max(cut[0]) > 1e-8)
+                        {
+                            insert_rapid = Some(local_contact_pose(cutting, m.from, m.to, z, *band));
+                        }
+                    } else {
+                        if gouge.is_none()
+                            && let Some(target) = finished_band(setup, path, z)
+                            && let Some(band) = remaining.iter().find(|b| b[1].min(cut[1]).min(target[1]) - b[0].max(cut[0]).max(target[0]) > 0.002)
+                        {
+                            gouge =
+                                Some(local_contact_pose(cutting, m.from, m.to, z, [band[0].max(target[0]) + 0.001, band[1].min(target[1]) - 0.001]));
                         }
                         crate::insert::subtract(remaining, cut);
                     }
@@ -420,7 +529,9 @@ pub fn simulate(setup: &Setup, path: &Toolpath, resolution: f64) -> Result<Simul
             return invalid("insert replay display size limit");
         }
         if let Some(n) = station {
-            for (hit, target) in [(insert_rapid, "insert_rapid_stock"), (gouge, "insert_gouge")] {
+            let (rapid_target, gouge_target) =
+                if cutting.is_some() { ("cutter_rapid_stock", "cutter_gouge") } else { ("insert_rapid_stock", "insert_gouge") };
+            for (hit, target) in [(insert_rapid, rapid_target), (gouge, gouge_target)] {
                 if let Some(tip) = hit {
                     if report.contacts.len() < 256 {
                         report.contacts.push(Contact { move_index: index, station: n, target: target.into(), tip });
@@ -469,6 +580,120 @@ mod tests {
         Operation, Stock, TurningPlan,
         machining::{Move, OdJob},
     };
+
+    #[test]
+    fn nominal_drill_and_groove_detect_finished_gouge_and_rapid_stock_contact() {
+        use crate::machining::sequence::{Cutting, Drill, Groove, OperationSpan};
+        for drill in [false, true] {
+            let (mut setup, mut path) = fixture();
+            let source = crate::machining::ModelSource {
+                body: "analytic solid target".into(),
+                reverse: false,
+                origin: [0.; 3],
+                axis: [0., 0., 1.],
+                approximation_mm: 0.,
+            };
+            setup.od_job.as_mut().unwrap().model_source = Some(source.clone());
+            path.job.model_source = Some(source);
+            let (kind, phase, cutting, from, to) = if drill {
+                (
+                    OperationKind::Drill,
+                    Phase::Drill,
+                    Cutting::Drill(Drill { diameter_mm: 8., tip_end_z_mm: -5., feed_mm_rev: 0.1, ..Default::default() }),
+                    ProfilePoint { z_mm: 2., diameter_mm: 0. },
+                    ProfilePoint { z_mm: -5., diameter_mm: 0. },
+                )
+            } else {
+                (
+                    OperationKind::OdGrooveRough,
+                    Phase::OdGrooveRough,
+                    Cutting::OdGroove(Groove {
+                        front_z_mm: -2.,
+                        width_mm: 2.,
+                        bottom_diameter_mm: 10.,
+                        tool_width_mm: 2.,
+                        radial_depth_mm: 1.,
+                        feed_mm_rev: 0.1,
+                        ..Default::default()
+                    }),
+                    ProfilePoint { z_mm: -2., diameter_mm: 22. },
+                    ProfilePoint { z_mm: -2., diameter_mm: 10. },
+                )
+            };
+            setup.operations = vec![Operation {
+                id: "local".into(),
+                name: "local".into(),
+                kind,
+                station: kind.suggested_station(),
+                cutting: Some(cutting),
+                spindle: None,
+                manual_separation: None,
+            }];
+            path.operation_spans = vec![OperationSpan { operation_id: "local".into(), start: 0, end: 1 }];
+            path.moves = vec![Move { from, to, phase, motion: Motion::Feed, feed_mm_rev: Some(0.1) }];
+            let report = simulate(&setup, &path, 0.5).unwrap();
+            let contact = report.contacts.iter().find(|c| c.target == "cutter_gouge").unwrap();
+            assert_eq!(contact.move_index, 0);
+            assert!(contact.tip.z_mm >= to.z_mm && contact.tip.z_mm <= from.z_mm);
+            assert!(contact.tip.diameter_mm >= to.diameter_mm && contact.tip.diameter_mm <= from.diameter_mm);
+            assert!(report.scope.contains("nominal drill"));
+            assert!(report.insert_stations.is_empty());
+            path.moves[0].motion = Motion::Rapid;
+            let rapid = simulate(&setup, &path, 0.5).unwrap();
+            assert!(rapid.contacts.iter().any(|c| c.target == "cutter_rapid_stock"));
+            assert!(rapid.band_edits.is_empty());
+        }
+    }
+
+    #[test]
+    fn nominal_groove_gouge_checks_include_model_features_narrower_than_resolution() {
+        use crate::machining::sequence::{Cutting, Groove, OperationSpan};
+        let (mut setup, mut path) = fixture();
+        path.job.profile = [(0., 16.), (-2., 16.), (-2., 12.), (-2.03, 12.), (-2.03, 16.), (-10., 16.)]
+            .into_iter()
+            .map(|(z_mm, diameter_mm)| ProfilePoint { z_mm, diameter_mm })
+            .collect();
+        path.job.model_source = Some(crate::machining::ModelSource {
+            body: "analytic narrow groove".into(),
+            reverse: false,
+            origin: [0.; 3],
+            axis: [0., 0., 1.],
+            approximation_mm: 0.,
+        });
+        setup.od_job = Some(path.job.clone());
+        setup.operations = vec![Operation {
+            id: "narrow".into(),
+            name: "narrow".into(),
+            kind: OperationKind::OdGrooveRough,
+            station: Some(11),
+            spindle: None,
+            manual_separation: None,
+            cutting: Some(Cutting::OdGroove(Groove {
+                front_z_mm: -2.,
+                width_mm: 0.03,
+                tool_width_mm: 0.03,
+                bottom_diameter_mm: 10.,
+                radial_depth_mm: 1.,
+                feed_mm_rev: 0.1,
+                ..Default::default()
+            })),
+        }];
+        path.operation_spans = vec![OperationSpan { operation_id: "narrow".into(), start: 0, end: 1 }];
+        path.moves = vec![Move {
+            from: ProfilePoint { z_mm: -2., diameter_mm: 22. },
+            to: ProfilePoint { z_mm: -2., diameter_mm: 10. },
+            phase: Phase::OdGrooveRough,
+            motion: Motion::Feed,
+            feed_mm_rev: Some(0.1),
+        }];
+        let report = simulate(&setup, &path, 2.).unwrap();
+        assert!(report.initial.iter().any(|s| (s.z0 + 2.03).abs() < 1e-8 && (s.z1 + 2.).abs() < 1e-8));
+        assert!(report.contacts.iter().any(|c| c.target == "cutter_gouge"));
+        // A different explicit manual target remains compatible, and is not a model check.
+        setup.od_job.as_mut().unwrap().model_source = None;
+        path.job.model_source = None;
+        assert!(simulate(&setup, &path, 2.).unwrap().contacts.iter().all(|c| c.target != "cutter_gouge"));
+    }
     fn fixture() -> (Setup, Toolpath) {
         let mut setup = TurningPlan::nl2500().setups.remove(0);
         let stock = Stock { outer_diameter_mm: 20., inner_diameter_mm: 4., length_mm: 12. };
@@ -523,6 +748,64 @@ mod tests {
         assert!(tool.validate().is_err());
         assert!(simulate(&setup, &path, f64::NAN).is_err());
     }
+
+    #[test]
+    fn clipped_toolpaths_check_insert_gouge_against_the_complete_od_and_id_target() {
+        for inner in [false, true] {
+            let (mut setup, _) = fixture();
+            let mut job = setup.od_job.take().unwrap();
+            let (front_diameter, rear_diameter) = if inner { (40., 10.) } else { (20., 50.) };
+            job.profile = [(0., front_diameter), (-20.03, front_diameter), (-20.03, rear_diameter), (-60., rear_diameter)]
+                .into_iter()
+                .map(|(z_mm, diameter_mm)| ProfilePoint { z_mm, diameter_mm })
+                .collect();
+            job.stock_front_z_mm = 2.;
+            job.chuck_front_z_mm = -75.;
+            job.radial_depth_mm = 2.;
+            job.finish = false;
+            setup.stock = Some(Stock { outer_diameter_mm: 60., inner_diameter_mm: 4., length_mm: 82. });
+            setup.cut_end_z_mm = Some(-19.);
+            if inner {
+                setup.id_job = Some(job);
+            } else {
+                setup.od_job = Some(job);
+            }
+            let kinds = if inner { vec![OperationKind::IdRough] } else { vec![OperationKind::FaceRough, OperationKind::OdRough] };
+            setup.operations = kinds
+                .into_iter()
+                .enumerate()
+                .map(|(index, kind)| Operation {
+                    id: format!("clipped-{index}"),
+                    name: "partial cut".into(),
+                    kind,
+                    station: kind.suggested_station(),
+                    cutting: None,
+                    spindle: None,
+                    manual_separation: None,
+                })
+                .collect();
+            let station = if inner { 5 } else { 12 };
+            setup.turret.iter_mut().find(|slot| slot.station == station).unwrap().simulation = Some(ToolAssembly {
+                triangular_insert: true,
+                nose_radius_mm: Some(0.4),
+                insert: Some(crate::insert::Insert { orientation_rad: std::f64::consts::FRAC_PI_2, inner, ..Default::default() }),
+                ..Default::default()
+            });
+            let path = crate::machining::sequence::calculate(&setup).unwrap();
+            assert_eq!(path.job.profile.last().unwrap().z_mm, -19.);
+            assert!(path.moves.iter().all(|m| m.from.z_mm >= -19. - 1e-8 && m.to.z_mm >= -19. - 1e-8));
+            let target = finished_band(&setup, &path, -20.5).unwrap();
+            assert_eq!(target, if inner { [5., 30.] } else { [2., 25.] });
+            let report = simulate(&setup, &path, 0.5).unwrap();
+            assert!(report.initial.iter().any(|slab| (slab.z0 + 20.03).abs() < 1e-8));
+            assert!(report.contacts.iter().any(|c| c.station == station && c.target == "insert_gouge"));
+            // Keeping the clipped path job preserves legacy NC regeneration and line mapping.
+            let nc = crate::machining::review_program(&path).unwrap();
+            assert_eq!(nc.move_lines.len(), path.moves.len());
+            assert!(nc.move_lines.iter().all(Option::is_some));
+        }
+    }
+
     #[test]
     fn continuous_sweep_detects_crossing_with_both_endpoints_clear() {
         let (mut setup, mut path) = fixture();

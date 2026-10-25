@@ -148,6 +148,22 @@ fn invalid_stock_undercuts_and_unbounded_conditions_are_refused() {
 }
 
 #[test]
+fn standalone_od_paths_and_nc_refuse_proven_stock_shortages_without_a_setup() {
+    let (mut job, stock) = fixture();
+    job.radial_stock_to_leave_mm = 0.;
+    job.profile = vec![p(0., 20.), p(-59.999, 40.), p(-60., 60.01)];
+    assert!(calculate(&job, &stock).is_err(), "a narrow rear taper exceeding the OD is still missing material");
+    let (job, stock) = fixture();
+    let mut path = calculate(&job, &stock).unwrap();
+    assert!(path.source_setup.is_none());
+    path.stock.length_mm = 40.;
+    assert!(review_nc(&path).is_err(), "standalone NC must recheck axial stock instead of trusting cached moves");
+    path.stock = stock;
+    path.stock.inner_diameter_mm = 21.;
+    assert!(review_nc(&path).is_err(), "an OD inside the original bore has no stock");
+}
+
+#[test]
 fn zero_allowance_and_zero_front_stock_do_not_add_a_face_cut() {
     let (mut job, stock) = fixture();
     job.radial_stock_to_leave_mm = 0.0;

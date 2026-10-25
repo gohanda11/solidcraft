@@ -13,10 +13,20 @@ pub(super) struct View {
     pub error: Option<String>,
     pub stop_on_contact: bool,
     pub focus_contact: Option<usize>,
+    pub bounds: Option<[f64; 4]>,
 }
 impl Default for View {
     fn default() -> Self {
-        Self { report: None, selected_station: 12, resolution: 0.1, action: None, error: None, stop_on_contact: true, focus_contact: None }
+        Self {
+            report: None,
+            selected_station: 12,
+            resolution: 0.1,
+            action: None,
+            error: None,
+            stop_on_contact: true,
+            focus_contact: None,
+            bounds: None,
+        }
     }
 }
 
@@ -182,15 +192,19 @@ pub(super) fn report_settings(ui: &mut egui::Ui, setup: &Setup, state: &mut Stat
             }
         });
     });
-    if button(ui, "cam_sim_calculate", "cam.sim_calculate") {
+    if state.machining.draft_preview {
+        ui.colored_label(Tokens::get().warning, tr("cam.sim_unsaved_candidate"));
+    }
+    if button(ui, "cam_sim_calculate", if state.machining.draft_preview { "cam.sim_saved_operations" } else { "cam.sim_calculate" }) {
         state.simulation.action = Some(setup.id.clone());
     }
     ui_kit::checkbox(ui, tr("cam.sim_stop_contact"), &mut state.simulation.stop_on_contact);
-    let valid = state
-        .simulation
-        .report
-        .as_ref()
-        .is_some_and(|(r, id, sim)| *r == revision && id == &setup.id && sim.resolution_mm == state.simulation.resolution);
+    let valid = !state.machining.draft_preview
+        && state
+            .simulation
+            .report
+            .as_ref()
+            .is_some_and(|(r, id, sim)| *r == revision && id == &setup.id && sim.resolution_mm == state.simulation.resolution);
     if let Some((_, _, report)) = &state.simulation.report {
         if !valid {
             ui.colored_label(Tokens::get().warning, tr("cam.path_stale"));
@@ -222,25 +236,17 @@ pub(super) fn report_settings(ui: &mut egui::Ui, setup: &Setup, state: &mut Stat
             }
             egui::ScrollArea::vertical().id_salt("cam_sim_contacts").max_height(170.).show(ui, |ui| {
                 for (index, c) in report.contacts.iter().enumerate() {
-                    let label = format!(
-                        "#{} T{:02} {}",
-                        c.move_index + 1,
-                        c.station,
-                        tr(match c.target.as_str() {
-                            "remaining_stock" => "cam.sim_stock_hit",
-                            "insert_rapid_stock" => "cam.insert_rapid_hit",
-                            "insert_gouge" => "cam.insert_gouge",
-                            _ => "cam.sim_chuck_hit",
-                        })
-                    );
-                    let response = ui_kit::button(ui, label, ui_kit::Button::Normal);
+                    let label = format!("#{} T{:02} {}", c.move_index + 1, c.station, contact_reason(&c.target));
+                    let response = controls::pick(ui, state.simulation.focus_contact == Some(index), label);
                     let handle = format!("cam_sim_contact_{index}");
                     crate::scenario::publish_rect(&handle, response.rect);
                     crate::scenario::publish_handle(&handle, response.rect.center());
                     if response.clicked() {
                         state.machining.step = c.move_index;
+                        state.machining.before_move = None;
                         state.spatial.playing = false;
                         state.simulation.focus_contact = Some(index);
+                        state.flat.refit();
                     }
                 }
             });
@@ -250,7 +256,7 @@ pub(super) fn report_settings(ui: &mut egui::Ui, setup: &Setup, state: &mut Stat
         }
     }
     if let Some(error) = &state.simulation.error {
-        ui.colored_label(Tokens::get().warning, error);
+        error_label(ui, error);
     }
     ui.small(tr("cam.sim_limitations"));
 }
@@ -261,6 +267,7 @@ pub(super) fn process(app: &mut SolveApp, state: &mut State) {
         state.catalog.fit = true;
     }
     state.simulation.report = None;
+    state.simulation.bounds = None;
     state.simulation.focus_contact = None;
     state.spatial.playing = false;
     #[derive(serde::Deserialize)]
@@ -275,11 +282,21 @@ pub(super) fn process(app: &mut SolveApp, state: &mut State) {
         .and_then(|value| serde_json::from_value::<Response>(value).map_err(|e| e.to_string()))
     {
         Ok(r) => {
+            state.simulation.bounds = app
+                .session
+                .doc
+                .turning
+                .as_ref()
+                .and_then(|plan| plan.setups.iter().find(|setup| setup.id == r.setup))
+                .map(|setup| spatial::toolpath_bounds(setup, &r.toolpath));
             state.machining.preview = Some((r.revision, r.setup.clone(), r.toolpath));
             state.machining.generation = state.machining.generation.wrapping_add(1);
             state.machining.draft_preview = false;
+            state.selection.preview = None;
+            state.selection.picking = true;
             state.machining.show = true;
             state.machining.step = 0;
+            state.machining.before_move = Some(0);
             state.machining.show_nc = false;
             state.machining.action = Some(machining_ui::Action::InspectNc(r.setup.clone(), r.revision));
             state.simulation.report = Some((r.revision, r.setup, r.simulation));
@@ -292,10 +309,68 @@ pub(super) fn process(app: &mut SolveApp, state: &mut State) {
 
 pub(super) fn current(app: &SolveApp) -> Option<&Simulation> {
     let state = &app.turning_workspace;
-    if state.workflow != 4 {
+    if state.workflow != 4 || state.machining.draft_preview {
         return None;
     }
     let (r, id, sim) = state.simulation.report.as_ref()?;
     let selected = app.session.doc.turning.as_ref()?.setups.get(state.setup)?;
     (*r == app.session.revision && id == &selected.id && sim.resolution_mm == state.simulation.resolution).then_some(sim)
+}
+
+pub(super) fn current_move(state: &State) -> Option<usize> {
+    if state.machining.draft_preview {
+        return None;
+    }
+    state
+        .simulation
+        .focus_contact
+        .and_then(|index| {
+            state
+                .simulation
+                .report
+                .as_ref()
+                .filter(|(revision, setup, report)| {
+                    report.resolution_mm == state.simulation.resolution
+                        && state
+                            .machining
+                            .preview
+                            .as_ref()
+                            .is_some_and(|(path_revision, path_setup, _)| revision == path_revision && setup == path_setup)
+                })
+                .and_then(|(_, _, report)| report.contacts.get(index))
+        })
+        .map(|contact| contact.move_index)
+        .or(state.machining.before_move)
+        .or_else(|| state.machining.step.checked_sub(1))
+}
+
+fn contact_reason(target: &str) -> &'static str {
+    tr(match target {
+        "remaining_stock" => "cam.sim_stock_hit",
+        "insert_rapid_stock" => "cam.insert_rapid_hit",
+        "insert_gouge" => "cam.insert_gouge",
+        "cutter_rapid_stock" => "cam.cutter_rapid_hit",
+        "cutter_gouge" => "cam.cutter_gouge",
+        _ => "cam.sim_chuck_hit",
+    })
+}
+
+pub(super) fn contact_status(ui: &mut egui::Ui, state: &State) {
+    let Some(contact) =
+        state.simulation.focus_contact.and_then(|index| state.simulation.report.as_ref().and_then(|(_, _, report)| report.contacts.get(index)))
+    else {
+        return;
+    };
+    let response = ui.colored_label(
+        Tokens::get().error,
+        format!("{} #{} · T{:02} · {}", tr("cam.sim_contact_at_move"), contact.move_index + 1, contact.station, contact_reason(&contact.target)),
+    );
+    crate::scenario::publish_rect("cam_sim_contact_status", response.rect);
+    ui.small(format!(
+        "{} {} / X{:.3} Z{:.3} mm",
+        tr("cam.sim_completed_before_contact"),
+        state.machining.step,
+        contact.tip.diameter_mm,
+        contact.tip.z_mm
+    ));
 }

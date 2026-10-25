@@ -21,14 +21,14 @@ pub(super) struct View {
 }
 
 #[derive(Clone, Copy)]
-struct Frame {
+struct ModelFrame {
     origin: Vec3,
     axis: Vec3,
     radial: Vec3,
     normal: Vec3,
 }
 
-impl Frame {
+impl ModelFrame {
     fn new(source: &ModelSource) -> Option<Self> {
         let [x, y, z] = source.origin;
         let origin = Vec3::new(x, y, z);
@@ -66,29 +66,32 @@ fn profile(app: &SolveApp) -> Option<(&ModelSource, &[ProfilePoint])> {
 }
 
 fn path(app: &SolveApp) -> Option<&Toolpath> {
+    if app.turning_workspace.workflow == 4 && app.turning_workspace.machining.draft_preview {
+        return None;
+    }
     let (revision, id, path) = app.turning_workspace.machining.preview.as_ref()?;
     (*revision == app.session.revision && setup(app).is_some_and(|s| &s.id == id)).then_some(path)
 }
 
-fn frame(app: &SolveApp) -> Option<Frame> {
+fn frame(app: &SolveApp) -> Option<ModelFrame> {
     model_frame(app).or_else(|| {
         setup(app)?.stock.as_ref()?;
-        Some(Frame { origin: Vec3::ZERO, axis: Vec3::Z, radial: Vec3::X, normal: Vec3::Y })
+        Some(ModelFrame { origin: Vec3::ZERO, axis: Vec3::Z, radial: Vec3::X, normal: Vec3::Y })
     })
 }
 
-fn model_frame(app: &SolveApp) -> Option<Frame> {
+fn model_frame(app: &SolveApp) -> Option<ModelFrame> {
     if app.turning_workspace.spatial.stage == 1
         && let Some(path) = path(app)
     {
-        return path.job.model_source.as_ref().or_else(|| path.id_path.as_ref()?.job.model_source.as_ref()).and_then(Frame::new);
+        return path.job.model_source.as_ref().or_else(|| path.id_path.as_ref()?.job.model_source.as_ref()).and_then(ModelFrame::new);
     }
     if app.turning_workspace.spatial.stage == 2 {
-        return setup(app)?.od_job.iter().chain(&setup(app)?.id_job).find_map(|j| j.model_source.as_ref().and_then(Frame::new));
+        return setup(app)?.od_job.iter().chain(&setup(app)?.id_job).find_map(|j| j.model_source.as_ref().and_then(ModelFrame::new));
     }
     profile(app)
-        .and_then(|(source, _)| Frame::new(source))
-        .or_else(|| setup(app)?.od_job.iter().chain(&setup(app)?.id_job).find_map(|j| j.model_source.as_ref().and_then(Frame::new)))
+        .and_then(|(source, _)| ModelFrame::new(source))
+        .or_else(|| setup(app)?.od_job.iter().chain(&setup(app)?.id_job).find_map(|j| j.model_source.as_ref().and_then(ModelFrame::new)))
 }
 
 fn can_pick_end(app: &SolveApp) -> bool {
@@ -97,7 +100,15 @@ fn can_pick_end(app: &SolveApp) -> bool {
 
 pub fn scene_key(
     app: &SolveApp,
-) -> (bool, usize, usize, Option<(u64, u64)>, Option<[u64; 6]>, Option<(u64, usize, Option<usize>, u64)>, Option<(bool, String, u64, u8)>) {
+) -> (
+    bool,
+    usize,
+    usize,
+    Option<(u64, u64)>,
+    Option<[u64; 6]>,
+    Option<(u64, usize, Option<usize>, Option<usize>, u64)>,
+    Option<(bool, String, u64, u8)>,
+) {
     (
         super::active(app),
         app.turning_workspace.spatial.stage,
@@ -109,6 +120,7 @@ pub fn scene_key(
                 app.session.revision,
                 app.turning_workspace.machining.step,
                 app.turning_workspace.simulation.focus_contact,
+                app.turning_workspace.machining.before_move,
                 app.turning_workspace.simulation.resolution.to_bits(),
             )
         }),
@@ -241,18 +253,12 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         overlay(app, ui);
     });
     if app.turning_workspace.machining.show_nc {
-        let mut open = true;
-        egui::Window::new(tr("cam.path_nc_view"))
-            .id(egui::Id::new("cam_nc_window"))
-            .open(&mut open)
-            .default_pos(egui::pos2(rect.right() - 100., rect.top() + 50.))
-            .default_width(440.)
-            .default_height(380.)
-            .resizable(true)
-            .show(ui.ctx(), |ui| {
+        let closed = ui_kit::Window::new(egui::Id::new("cam_nc_window"), "export", tr("cam.path_nc_view"))
+            .placed(Align2::RIGHT_TOP, egui::pos2(rect.right() - Tokens::get().space_12, rect.top() + Tokens::get().space_12))
+            .show_body(ui.ctx(), |ui| {
                 super::machining_ui::contents(app, ui);
             });
-        if !open {
+        if closed {
             app.turning_workspace.machining.show_nc = false;
         }
     }
@@ -294,10 +300,12 @@ fn range_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
 
 pub(super) fn playback(app: &mut SolveApp, ui: &mut egui::Ui) {
     let count = path(app).map_or(0, |p| p.moves.len());
+    let valid_simulation = super::simulation_ui::current(app).is_some();
     let state = &mut app.turning_workspace;
     ui.horizontal_wrapped(|ui| {
         if button(ui, "cam_play", if state.spatial.playing { "cam.spatial_pause" } else { "cam.spatial_play" }, state.spatial.playing) {
             state.spatial.playing = !state.spatial.playing;
+            state.machining.before_move = None;
             if state.simulation.focus_contact.take().is_some() && state.spatial.playing {
                 state.machining.step = state.machining.step.saturating_add(1).min(count);
             }
@@ -324,6 +332,8 @@ pub(super) fn playback(app: &mut SolveApp, ui: &mut egui::Ui) {
         .changed()
         {
             state.simulation.focus_contact = None;
+            state.machining.before_move = None;
+            state.spatial.playing = false;
         }
         if let Some(kind) = state.spatial.operation {
             ui.label(tr(super::kind_label(kind)));
@@ -337,7 +347,7 @@ pub(super) fn playback(app: &mut SolveApp, ui: &mut egui::Ui) {
         let advance = ((now - state.spatial.last_tick).max(0.) * 12.).floor() as usize;
         if advance > 0 {
             let next = state.machining.step.saturating_add(advance).min(count);
-            let contact = if state.workflow == 4 && state.simulation.stop_on_contact {
+            let contact = if valid_simulation && state.simulation.stop_on_contact {
                 state
                     .simulation
                     .report
@@ -351,6 +361,8 @@ pub(super) fn playback(app: &mut SolveApp, ui: &mut egui::Ui) {
                 state.machining.step = step;
                 state.simulation.focus_contact = Some(index);
                 state.spatial.playing = false;
+                state.machining.before_move = None;
+                state.flat.refit();
             } else {
                 state.machining.step = next;
             }
@@ -361,6 +373,10 @@ pub(super) fn playback(app: &mut SolveApp, ui: &mut egui::Ui) {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
         }
     }
+    if valid_simulation {
+        super::simulation_ui::contact_status(ui, state);
+    }
+    sync_review_operation(app);
 }
 
 fn matches_operation(kind: OperationKind, phase: Phase) -> bool {
@@ -388,11 +404,97 @@ pub(super) fn simulation_pose(app: &SolveApp) -> Option<(ProfilePoint, Option<u8
         return Some((c.tip, Some(c.station), true));
     }
     let path = path(app)?;
-    let m = if state.machining.step == 0 { path.moves.first()? } else { path.moves.get(state.machining.step - 1)? };
-    let station = cam::machining::sequence::operation_at(path, setup(app)?, state.machining.step.saturating_sub(1))
+    let index = super::simulation_ui::current_move(state).unwrap_or(0);
+    let m = path.moves.get(index)?;
+    let station = cam::machining::sequence::operation_at(path, setup(app)?, index)
         .map(|o| o.station)
         .unwrap_or_else(|| setup(app).and_then(|s| cam::simulation::station(s, m.phase)));
-    Some((if state.machining.step == 0 { m.from } else { m.to }, station, false))
+    Some((if state.machining.before_move.is_some() || state.machining.step == 0 { m.from } else { m.to }, station, false))
+}
+
+/// Stable Z/radius limits for an entire replay, including real configured tool envelopes.
+/// Cached when simulation is calculated; never rebuild insert outlines on each animation frame.
+pub(super) fn simulation_bounds(app: &SolveApp) -> Option<[f64; 4]> {
+    super::simulation_ui::current(app)?;
+    app.turning_workspace.simulation.bounds
+}
+
+pub(super) fn toolpath_bounds(setup: &Setup, path: &Toolpath) -> [f64; 4] {
+    let mut bounds = [
+        path.job.stock_front_z_mm - path.stock.length_mm,
+        path.job.stock_front_z_mm,
+        -path.stock.outer_diameter_mm * 0.5,
+        path.stock.outer_diameter_mm * 0.5,
+    ];
+    let mut include = |z: f64, r: f64| {
+        if z.is_finite() && r.is_finite() {
+            bounds[0] = bounds[0].min(z);
+            bounds[1] = bounds[1].max(z);
+            bounds[2] = bounds[2].min(r);
+            bounds[3] = bounds[3].max(r);
+        }
+    };
+    let tools: Vec<_> = setup
+        .turret
+        .iter()
+        .map(|slot| {
+            let mut envelope = [0_f64; 4];
+            if let Some(tool) = &slot.simulation {
+                if let Some(holder) = tool.holder.as_ref().filter(|holder| holder.ready()) {
+                    envelope[0] = envelope[0].min(holder.z_start_mm);
+                    envelope[1] = envelope[1].max(holder.z_start_mm + holder.length_mm);
+                    envelope[2] = envelope[2].min(holder.r_center_mm - holder.width_mm * 0.5);
+                    envelope[3] = envelope[3].max(holder.r_center_mm + holder.width_mm * 0.5);
+                }
+                if let Some(insert) = &tool.insert
+                    && let Ok(points) = insert.outline(tool.nose_radius_mm.unwrap_or(0.))
+                {
+                    for [z, r] in points {
+                        envelope[0] = envelope[0].min(z);
+                        envelope[1] = envelope[1].max(z);
+                        envelope[2] = envelope[2].min(r);
+                        envelope[3] = envelope[3].max(r);
+                    }
+                }
+            }
+            (slot.station, envelope)
+        })
+        .collect();
+    for (index, movement) in path.moves.iter().enumerate() {
+        let operation = cam::machining::sequence::operation_at(path, setup, index);
+        let station = operation.and_then(|operation| operation.station).or_else(|| cam::simulation::station(setup, movement.phase));
+        let mut envelope = station.and_then(|station| tools.iter().find(|(n, _)| *n == station)).map_or([0.; 4], |(_, envelope)| *envelope);
+        if let Some(cutting) = operation.and_then(|operation| operation.cutting.as_ref()) {
+            match cutting {
+                cam::machining::sequence::Cutting::Drill(drill) => {
+                    envelope[1] = envelope[1].max(drill.point_length() + drill.diameter_mm);
+                    envelope[2] = envelope[2].min(-drill.diameter_mm * 0.5);
+                    envelope[3] = envelope[3].max(drill.diameter_mm * 0.5);
+                }
+                cam::machining::sequence::Cutting::OdGroove(groove) => envelope[0] = envelope[0].min(-groove.tool_width_mm),
+                _ => {}
+            }
+        }
+        for tip in [movement.from, movement.to] {
+            include(tip.z_mm + envelope[0], tip.diameter_mm * 0.5 + envelope[2]);
+            include(tip.z_mm + envelope[1], tip.diameter_mm * 0.5 + envelope[3]);
+        }
+    }
+    bounds
+}
+
+fn sync_review_operation(app: &mut SolveApp) {
+    let Some(index) = super::simulation_ui::current_move(&app.turning_workspace) else { return };
+    let Some(operation_index) = path(app).zip(setup(app)).and_then(|(path, setup)| {
+        let operation = cam::machining::sequence::operation_at(path, setup, index).or_else(|| {
+            let kind = cam::simulation::operation(path.moves.get(index)?.phase)?;
+            setup.operations.iter().find(|operation| operation.kind == kind)
+        })?;
+        setup.operations.iter().position(|o| o.id == operation.id)
+    }) else {
+        return;
+    };
+    app.turning_workspace.operation = operation_index;
 }
 
 fn simulation_scene(app: &SolveApp) -> Option<GpuScene> {
@@ -403,8 +505,7 @@ fn simulation_scene(app: &SolveApp) -> Option<GpuScene> {
     let mut scene = GpuScene::default();
     stock_surface(&mut scene, frame, &slabs, Tokens::get().body.to_array());
     if let Some((tip, station, contact)) = simulation_pose(app) {
-        let index =
-            state.simulation.focus_contact.and_then(|i| report.contacts.get(i)).map_or(state.machining.step.saturating_sub(1), |c| c.move_index);
+        let index = super::simulation_ui::current_move(state).unwrap_or(0);
         let cutting = path(app)
             .and_then(|p| cam::machining::sequence::operation_at(p, setup(app)?, index))
             .and_then(|o| o.cutting.as_ref())
@@ -487,7 +588,7 @@ fn simulation_scene(app: &SolveApp) -> Option<GpuScene> {
 }
 
 /// Wire representation of the same idealised cutting envelope used by stock replay.
-fn local_cutter(scene: &mut GpuScene, frame: Frame, tip: ProfilePoint, cutting: &cam::machining::sequence::Cutting) {
+fn local_cutter(scene: &mut GpuScene, frame: ModelFrame, tip: ProfilePoint, cutting: &cam::machining::sequence::Cutting) {
     use cam::machining::sequence::Cutting;
     let color = Tokens::get().warning.to_array();
     let mut line = |a: Vec3, b: Vec3| scene.guide_line(a.to_f32(), b.to_f32(), color, 2.);
@@ -567,7 +668,7 @@ fn stock_edges(slabs: &[cam::simulation::Slab]) -> Vec<([f64; 2], [f64; 2])> {
     edges
 }
 
-fn stock_surface(scene: &mut GpuScene, frame: Frame, slabs: &[cam::simulation::Slab], color: [u8; 4]) {
+fn stock_surface(scene: &mut GpuScene, frame: ModelFrame, slabs: &[cam::simulation::Slab], color: [u8; 4]) {
     for (a, b) in stock_edges(slabs) {
         for i in 0..48 {
             let theta = i as f64 * std::f64::consts::TAU / 48.;
@@ -784,7 +885,7 @@ pub fn click(app: &mut SolveApp, hit: Option<&Hit>, pos: Pos2, proj: &Proj) -> b
     }
     if app.turning_workspace.workflow == 2 && app.turning_workspace.selection.editing && app.turning_workspace.selection.picking {
         let picked = profile(app).and_then(|(source, points)| {
-            let frame = Frame::new(source)?;
+            let frame = ModelFrame::new(source)?;
             points
                 .iter()
                 .enumerate()
@@ -804,7 +905,7 @@ pub fn click(app: &mut SolveApp, hit: Option<&Hit>, pos: Pos2, proj: &Proj) -> b
             return true;
         }
         let picked = profile(app).and_then(|(source, points)| {
-            let frame = Frame::new(source)?;
+            let frame = ModelFrame::new(source)?;
             points
                 .iter()
                 .filter(|p| p.z_mm < -0.001)
@@ -967,6 +1068,50 @@ mod tests {
     }
 
     #[test]
+    fn review_seek_uses_next_tool_before_removing_stock_and_fits_its_swept_envelope() {
+        let mut h = Harness::new();
+        let script: serde_json::Value = serde_json::from_str(include_str!("../../../../examples/turning-toolpath.json")).unwrap();
+        for c in script["commands"].as_array().unwrap() {
+            h.app.run(c["command"].as_str().unwrap(), c["params"].clone()).unwrap();
+        }
+        let mut plan = h.app.session.doc.turning.as_deref().unwrap().clone();
+        plan.setups[0].turret[11].simulation = Some(cam::simulation::ToolAssembly {
+            triangular_insert: true,
+            nose_radius_mm: Some(0.4),
+            insert: Some(cam::insert::Insert::default()),
+            holder: Some(cam::simulation::Holder { length_mm: 100., width_mm: 40., height_mm: 6., r_center_mm: 12., ..Default::default() }),
+            holder_verified: true,
+        });
+        h.app.run("cam.turning.set", json!({"plan":plan})).unwrap();
+        h.app.home.open = false;
+        super::super::enter(&mut h.app, "turning").unwrap();
+        h.app.turning_workspace.workflow = 4;
+        click_button(&mut h, "cam_sim_calculate");
+        let path = path(&h.app).unwrap();
+        let first_finish = path.moves.iter().position(|movement| movement.phase == Phase::OdFinish).unwrap();
+        let first_tip = path.moves[first_finish].from;
+        let rough_r_max = path
+            .moves
+            .iter()
+            .filter(|movement| cam::simulation::station(setup(&h.app).unwrap(), movement.phase) == Some(12))
+            .flat_map(|movement| [movement.from.diameter_mm * 0.5, movement.to.diameter_mm * 0.5])
+            .fold(0_f64, f64::max);
+        assert!(simulation_bounds(&h.app).unwrap()[3] >= rough_r_max + 12. + 20.);
+        let first_contact = super::super::simulation_ui::current(&h.app).unwrap().contacts.first().cloned().unwrap();
+        h.app.turning_workspace.machining.step = first_finish;
+        h.app.turning_workspace.machining.before_move = Some(first_finish);
+        assert_eq!(simulation_pose(&h.app), Some((first_tip, Some(6), false)));
+        h.app.turning_workspace.simulation.focus_contact = Some(0);
+        assert_eq!(super::super::simulation_ui::current_move(&h.app.turning_workspace), Some(first_contact.move_index));
+        assert_eq!(simulation_pose(&h.app), Some((first_contact.tip, Some(first_contact.station), true)));
+        h.frames(3);
+        let canvas = crate::scenario::rect_of("cam_flat_canvas").unwrap();
+        assert!(canvas.contains_rect(crate::scenario::rect_of("cam_sim_holder_bounds").unwrap()));
+        assert!(canvas.contains_rect(crate::scenario::rect_of("cam_sim_insert_bounds").unwrap()));
+        assert!(crate::scenario::rect_of("cam_sim_contact_status").is_some());
+    }
+
+    #[test]
     fn three_d_range_section_stages_and_nc_use_the_same_revision() {
         let mut h = Harness::new();
         let script: serde_json::Value = serde_json::from_str(include_str!("../../../../examples/turning-inner-profile.json")).unwrap();
@@ -1002,7 +1147,7 @@ mod tests {
         assert_eq!(scene_key(&h.app), key, "playhead must not invalidate the GPU stage mesh");
         click_button(&mut h, "cam_play");
         click_button(&mut h, "cam_path_nc_view");
-        assert!(h.widget("O9001 (SOLIDCRAFT REVIEW ONLY)").is_some());
+        assert!(crate::scenario::rect_of("cam_nc_current_line").is_some());
         click_button(&mut h, "cam_path_back_paths");
         click_button(&mut h, "cam_step_1");
         h.app.turning_workspace.advanced = true;
@@ -1012,7 +1157,7 @@ mod tests {
         let (source, points) = profile(&h.app).unwrap();
         let point = points.iter().find(|p| p.z_mm < -0.001 && p.z_mm > -59.).copied().unwrap();
         let proj = crate::viewport::projection(&h.app, h.app.viewport.rect.unwrap());
-        let pos = proj.to_screen(Frame::new(source).unwrap().point(point)).unwrap();
+        let pos = proj.to_screen(ModelFrame::new(source).unwrap().point(point)).unwrap();
         assert!(click(&mut h.app, None, pos, &proj));
         assert_eq!(setup(&h.app).unwrap().cut_end_z_mm, Some(point.z_mm));
         assert!(path(&h.app).is_none());
@@ -1037,7 +1182,7 @@ mod tests {
     fn diameter_world_frame_and_reverse_are_respected() {
         for axis in [[1., 0., 0.], [-1., 0., 0.], [0., 0., 1.]] {
             let frame =
-                Frame::new(&ModelSource { body: "test".into(), reverse: false, origin: [10., 20., 30.], axis, approximation_mm: 0. }).unwrap();
+                ModelFrame::new(&ModelSource { body: "test".into(), reverse: false, origin: [10., 20., 30.], axis, approximation_mm: 0. }).unwrap();
             let p = frame.point(ProfilePoint { z_mm: -12., diameter_mm: 40. }) - frame.origin;
             assert!((p.dot(frame.axis) + 12.).abs() < 1e-9);
             assert!((p.dot(frame.radial) - 20.).abs() < 1e-9);

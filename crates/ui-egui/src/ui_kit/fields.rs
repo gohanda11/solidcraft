@@ -558,6 +558,28 @@ pub(crate) fn number_field<T: egui::emath::Numeric>(
     response
 }
 
+/// A bounded editor for values whose loaded/unset state must not be silently corrected.
+/// New user edits use the range; callers display and validate any existing out-of-range value.
+pub(crate) fn number_field_preserving_value<T: egui::emath::Numeric>(
+    ui: &mut Ui,
+    value: &mut T,
+    range: std::ops::RangeInclusive<T>,
+    speed: f64,
+    suffix: &str,
+) -> Response {
+    let response = ui.add(
+        egui::DragValue::new(value).range(range).clamp_existing_to_range(false).speed(speed).suffix(suffix).custom_parser(crate::prefs::parse_number),
+    );
+    Tokens::get().input_bevel(ui, &response);
+    response.widget_info(|| {
+        let mut info = egui::WidgetInfo::drag_value(ui.is_enabled(), value.to_f64());
+        info.label = Some(crate::i18n::tr_label(label(ui)).to_string());
+        info
+    });
+    super::layout::publish_geometry(ui, &response);
+    response
+}
+
 /// Growing plain-text message editor; its parent owns scrolling and Enter routing.
 /// Tokens: control_fill, form_inset, font_label. Use text_area for bounded data input.
 #[cfg(any(not(target_arch = "wasm32"), test))]

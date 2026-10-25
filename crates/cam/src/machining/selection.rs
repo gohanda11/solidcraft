@@ -4,6 +4,10 @@ use super::*;
 use crate::{Operation, OperationKind as K, Setup, simulation::Slab};
 use sequence::{Cutting, Limits, OperationSpan};
 
+mod coverage;
+pub(super) use coverage::require_covered;
+pub use coverage::{ShortageKind, StockCoverage, StockShortage, stock_coverage};
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Contour {
@@ -57,6 +61,7 @@ impl Contour {
             return invalid("輪郭または加工方向が変わりました。この工程の範囲を選び直してください");
         }
         let points = job.profile.get(self.first..=self.last).ok_or_else(|| PlanError("輪郭が変わりました。加工範囲を選び直してください".into()))?;
+        let points = if self.inner { points.to_vec() } else { sequence::turning_points(job, points)? };
         for pair in points.windows(2) {
             let [a, b] = pair else { continue };
             if b.z_mm > a.z_mm + EPS || if self.inner { b.diameter_mm > a.diameter_mm + EPS } else { b.diameter_mm < a.diameter_mm - EPS } {
@@ -66,7 +71,7 @@ impl Contour {
         if points.first().zip(points.last()).is_none_or(|(a, b)| a.z_mm - b.z_mm <= EPS) {
             return invalid("Z方向に長さのある輪郭を選択してください。端面は端面工程で設定します");
         }
-        Ok(points.to_vec())
+        Ok(points)
     }
     fn envelope(&self, setup: &Setup) -> Result<Vec<ProfilePoint>> {
         let points = self.points(setup)?;
@@ -93,6 +98,9 @@ pub struct Residual {
     pub slabs: Vec<Slab>,
     pub remaining_mm3: f64,
     pub resolution_mm: f64,
+    /// Material missing from the initial stock, independently of later cuts.
+    #[serde(default)]
+    pub coverage: StockCoverage,
 }
 fn initial(setup: &Setup, l: &Limits) -> Result<Vec<Slab>> {
     let stock = setup.stock.as_ref().ok_or_else(|| PlanError("材料を入力してください".into()))?;
@@ -108,9 +116,17 @@ fn initial(setup: &Setup, l: &Limits) -> Result<Vec<Slab>> {
             zs.extend([p.z_mm, p.z_mm + j.axial_stock_to_leave_mm]);
         }
     }
+    if let Some(drawing) = &setup.drawing {
+        zs.extend(drawing.inner.iter().map(|p| p.z_mm));
+    }
     for op in &setup.operations {
-        if let Some(Cutting::Contour(c)) = &op.cutting {
-            zs.extend(c.envelope(setup)?.iter().map(|p| p.z_mm));
+        match &op.cutting {
+            Some(Cutting::Contour(c)) => zs.extend(c.envelope(setup)?.iter().map(|p| p.z_mm)),
+            Some(Cutting::OdGroove(g)) => {
+                zs.extend([g.front_z_mm, g.front_z_mm - g.width_mm, g.front_z_mm - g.axial_leave_mm, g.front_z_mm - g.width_mm + g.axial_leave_mm])
+            }
+            Some(Cutting::Drill(d)) => zs.extend([d.tip_end_z_mm, d.full_diameter_z()]),
+            None => {}
         }
     }
     zs.retain(|z| z.is_finite() && *z >= back && *z <= l.stock_front_z_mm);
@@ -147,13 +163,19 @@ fn replay(slabs: &mut [Slab], moves: &[Move], cutting: Option<&Cutting>) {
         }
     }
 }
-fn residual(setup: &Setup, slabs: Vec<Slab>) -> Residual {
+fn residual(setup: &Setup, slabs: Vec<Slab>) -> Result<Residual> {
     let remaining_mm3 = slabs
         .iter()
         .map(|s| {
             let z = (s.z0 + s.z1) * 0.5;
             let outer = setup.od_job.as_ref().and_then(|j| diameter_at(&j.profile, z)).map(|d| d * 0.5);
-            let inner = setup.id_job.as_ref().and_then(|j| diameter_at(&j.profile, z)).map(|d| d * 0.5).unwrap_or(s.inner);
+            let inner = setup
+                .id_job
+                .as_ref()
+                .and_then(|j| diameter_at(&j.profile, z))
+                .or_else(|| setup.drawing.as_ref().and_then(|d| diameter_at(&d.inner, z)))
+                .map(|d| d * 0.5)
+                .unwrap_or(s.inner);
             let finished = outer.map_or(if z > 0. { 0. } else { (s.outer * s.outer - s.inner * s.inner).max(0.) }, |r| {
                 (r.min(s.outer).powi(2) - inner.max(s.inner).powi(2)).max(0.)
             });
@@ -161,10 +183,12 @@ fn residual(setup: &Setup, slabs: Vec<Slab>) -> Residual {
         })
         .sum();
     let resolution_mm = slabs.iter().map(|s| s.z1 - s.z0).fold(0., f64::max);
-    Residual { slabs, remaining_mm3, resolution_mm }
+    Ok(Residual { slabs, remaining_mm3, resolution_mm, coverage: stock_coverage(setup)? })
 }
 /// Initial difference is available before any operations or cutting conditions exist.
 pub fn difference(setup: &Setup) -> Result<Residual> {
+    // Bound and validate source geometry before the axial grid visits any input points.
+    stock_coverage(setup)?;
     if !setup.od_job.iter().chain(&setup.id_job).any(|j| j.profile.len() >= 2) {
         return invalid("先にモデルから完成輪郭を取得してください");
     }
@@ -174,11 +198,11 @@ pub fn difference(setup: &Setup) -> Result<Residual> {
         .or(setup.id_job.as_ref())
         .map(|j| Limits { stock_front_z_mm: j.stock_front_z_mm, chuck_front_z_mm: j.chuck_front_z_mm, clearance_mm: j.clearance_mm })
         .unwrap_or_default();
-    Ok(residual(setup, initial(setup, &l)?))
+    residual(setup, initial(setup, &l)?)
 }
 pub fn remaining(setup: &Setup) -> Result<Residual> {
     let (_, slabs) = plan(setup)?;
-    Ok(residual(setup, slabs))
+    residual(setup, slabs)
 }
 fn contour_moves(c: &Contour, setup: &Setup, slabs: &[Slab], l: &Limits) -> Result<Vec<Move>> {
     c.validate(c.kind())?;
@@ -321,6 +345,7 @@ fn plan(setup: &Setup) -> Result<(Toolpath, Vec<Slab>)> {
     isolated.previous_setup = None;
     validation.setups = vec![isolated];
     validation.validate()?;
+    require_covered(setup)?;
     let l = sequence::limits(setup)?;
     let mut slabs = initial(setup, &l)?;
     let stock = setup.stock.as_ref().ok_or_else(|| PlanError("材料未設定".into()))?;
@@ -360,17 +385,7 @@ fn plan(setup: &Setup) -> Result<(Toolpath, Vec<Slab>)> {
                 contour_moves(c, setup, &slabs, &l)?
             }
             Some(Cutting::Drill(d)) => {
-                // Reuse the local planner's drill/profile intersection validation.
-                for (j, outer) in setup.od_job.iter().map(|j| (j, true)).chain(setup.id_job.iter().map(|j| (j, false))) {
-                    let transition =
-                        diameter_at(&j.profile, d.full_diameter_z()).map(|diameter_mm| ProfilePoint { z_mm: d.full_diameter_z(), diameter_mm });
-                    for p in j.profile.iter().chain(transition.iter()) {
-                        let cut = ((p.z_mm - d.tip_end_z_mm) * (d.point_angle_rad * 0.5).tan() * 2.).clamp(0., d.diameter_mm);
-                        if (outer && cut >= p.diameter_mm - EPS) || (!outer && cut > p.diameter_mm + EPS) {
-                            return invalid("ドリルが完成輪郭を削り込みます");
-                        }
-                    }
-                }
+                sequence::check_drill_target(setup, d)?;
                 sequence::drill_moves(d, op.kind, stock, &l)?
             }
             Some(Cutting::OdGroove(g)) => {
@@ -404,7 +419,8 @@ fn plan(setup: &Setup) -> Result<(Toolpath, Vec<Slab>)> {
                 let inner = matches!(op.kind, K::IdRough | K::IdFinish);
                 let j = if inner { &setup.id_job } else { &setup.od_job };
                 let j = j.as_ref().ok_or_else(|| PlanError("輪郭未設定".into()))?;
-                let mut j = if let Some(end) = setup.cut_end_z_mm { j.clipped(end)? } else { j.clone() };
+                let j = if inner { j.clone() } else { sequence::turning_job(j)? };
+                let mut j = if let Some(end) = setup.cut_end_z_mm { j.clipped(end)? } else { j };
                 j.finish = finish;
                 if finish
                     && !setup.operations.iter().take(index).any(|o| {
@@ -462,6 +478,12 @@ fn plan(setup: &Setup) -> Result<(Toolpath, Vec<Slab>)> {
         t.insert_cad = None;
     }
     path.source_setup = Some(Box::new(source));
+    if setup.od_job.as_ref().is_some_and(|job| sequence::turning_job(job).is_ok_and(|envelope| envelope.profile != job.profile)) {
+        path.warnings.push("外径旋削は矩形溝の両側の外径をつなぐ経路です。溝の壁・底は残り、別の溝工程で加工します。完成輪郭と残材表示にはモデルの溝を保持しています。".into());
+    }
+    if !sequence::model_linked(setup) && setup.operations.iter().any(|o| sequence::local(o.kind)) {
+        path.warnings.push("手入力の穴・溝寸法を完成形状の指定として使用しています。モデル形状との一致は検証されていません。".into());
+    }
     Ok((path, slabs))
 }
 
@@ -524,18 +546,29 @@ pub fn propose(setup: &Setup, station: u8, c: &Contour) -> Result<Proposal> {
         });
     };
     if rough_then_finish {
+        let job = if c.inner { setup.id_job.as_ref() } else { setup.od_job.as_ref() }
+            .ok_or_else(|| PlanError("荒取り条件を設定する輪郭がありません。先にモデルから輪郭を取得してください".into()))?;
+        let side = if c.inner { "内径" } else { "外径" };
+        if !job.radial_depth_mm.is_finite() || !(0.001..=100.).contains(&job.radial_depth_mm) {
+            return Err(PlanError(format!("自動追加する{side}荒取りの切込みを0.001～100 mmで設定してから、もう一度プレビューしてください。")));
+        }
+        if !job.rough_feed_mm_rev.is_finite() || !(0.001..=10.).contains(&job.rough_feed_mm_rev) {
+            return Err(PlanError(format!("自動追加する{side}荒取りの送りを0.001～10 mm/revで設定してから、もう一度プレビューしてください。")));
+        }
         let role = if c.inner { crate::ToolRole::IdRough } else { crate::ToolRole::OdRough };
         let rough_station =
             setup.turret.iter().find(|t| t.role == role).map(|t| t.station).ok_or_else(|| PlanError("荒取り工具を登録してください".into()))?;
         let mut rough = c.clone();
         rough.radial_leave_mm = 0.1;
         rough.axial_leave_mm = 0.1;
+        rough.depth_mm = job.radial_depth_mm;
+        rough.feed_mm_rev = job.rough_feed_mm_rev;
         add(rough, rough_station);
     }
     add(c.clone(), station);
     candidate.operations.extend(operations.clone());
     let (path, slabs) = plan(&candidate)?;
-    Ok(Proposal { operations, insert_at, rough_then_finish, residual: residual(&candidate, slabs), path })
+    Ok(Proposal { operations, insert_at, rough_then_finish, residual: residual(&candidate, slabs)?, path })
 }
 
 #[cfg(test)]

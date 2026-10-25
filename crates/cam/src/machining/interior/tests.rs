@@ -92,6 +92,22 @@ fn through_id_refuses_missing_oversized_bore_undercut_and_chuck_entry() {
 }
 
 #[test]
+fn standalone_id_and_combined_nc_recheck_oversized_bore_at_taper_end() {
+    let (job, stock) = fixture();
+    let mut oversized = stock.clone();
+    oversized.inner_diameter_mm = 18.;
+    assert!(calculate(&job, &oversized).is_err());
+    let mut path = calculate(&job, &stock).unwrap();
+    path.stock = oversized.clone();
+    assert!(review_nc(&path).is_err());
+    let mut od = job.clone();
+    od.profile = vec![ProfilePoint { z_mm: 0., diameter_mm: 40. }, ProfilePoint { z_mm: -60., diameter_mm: 40. }];
+    let mut combined = calculate_setup(Some(&od), Some(&job), &stock).unwrap();
+    combined.stock = oversized;
+    assert!(review_nc(&combined).is_err());
+}
+
+#[test]
 fn combined_orders_all_rough_before_finish_and_has_continuous_safe_transfers() {
     let (id, stock) = fixture();
     let mut od = id.clone();

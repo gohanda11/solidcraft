@@ -1085,7 +1085,13 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
         ribbon_text(
             ui,
             pos2(ws.center().x, ws.top() + if labels { 69.0 } else { 50.0 }),
-            app.tr(if render { "ui.render" } else if crate::turning_workspace::active(app) { "cam.workspace" } else { "ui.design" }),
+            app.tr(if render {
+                "ui.render"
+            } else if crate::turning_workspace::active(app) {
+                "cam.workspace"
+            } else {
+                "ui.design"
+            }),
             t.font_button,
             t.text,
             true,

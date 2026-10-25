@@ -5,7 +5,7 @@ use solidcraft_engine::doc::cam::{
     machining::{Motion, OdJob, ProfilePoint, Toolpath},
 };
 
-use super::controls;
+use super::{controls, error_label};
 use crate::{SolveApp, i18n::tr, theme::Tokens, ui_kit};
 
 #[derive(Clone, Debug)]
@@ -21,6 +21,10 @@ struct NcPreview {
     setup: String,
     text: String,
     lines: Vec<String>,
+    move_lines: Vec<Option<usize>>,
+    line_moves: Vec<Option<usize>>,
+    follow: bool,
+    followed: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -38,6 +42,8 @@ pub struct View {
     pub(super) phase: usize,
     audit_inner: bool,
     pub(super) step: usize,
+    /// A cursor at the start of a move, before its material has been removed.
+    pub(super) before_move: Option<usize>,
     nc: Option<NcPreview>,
     pub(super) show_nc: bool,
     pub error: Option<String>,
@@ -140,7 +146,7 @@ pub fn settings(ui: &mut egui::Ui, setup: &mut Setup, view: &mut View, revision:
         ui.colored_label(Tokens::get().warning, tr("cam.path_stale"));
     }
     if let Some(e) = &view.error {
-        ui.colored_label(Tokens::get().warning, e);
+        error_label(ui, e);
     }
 }
 
@@ -150,6 +156,7 @@ pub fn process(app: &mut SolveApp, view: &mut View) {
             view.preview = None;
             view.nc = None;
             view.show_nc = false;
+            view.before_move = None;
             match app.run("cam.turning.toolpath", json!({"setup":setup})).and_then(|v| {
                 let rev = v.get("revision").and_then(|r| r.as_u64()).ok_or("missing revision")?;
                 let path: Toolpath = serde_json::from_value(v.get("toolpath").cloned().unwrap_or_default()).map_err(|e| e.to_string())?;
@@ -168,13 +175,21 @@ pub fn process(app: &mut SolveApp, view: &mut View) {
         }
         Some(Action::InspectNc(setup, revision)) => {
             view.nc = None;
-            match app
-                .run("cam.turning.nc", json!({"setup":setup,"expected_revision":revision}))
-                .and_then(|value| value.get("text").and_then(|t| t.as_str()).map(str::to_owned).ok_or_else(|| "missing NC text".to_string()))
-            {
-                Ok(text) => {
-                    let lines = text.lines().map(str::to_owned).collect();
-                    view.nc = Some(NcPreview { revision, setup, text, lines });
+            match app.run("cam.turning.nc", json!({"setup":setup,"expected_revision":revision})).and_then(|value| {
+                let text = value.get("text").and_then(|t| t.as_str()).map(str::to_owned).ok_or("missing NC text")?;
+                let move_lines: Vec<Option<usize>> =
+                    serde_json::from_value(value.get("move_lines").cloned().unwrap_or_default()).map_err(|e| e.to_string())?;
+                Ok((text, move_lines))
+            }) {
+                Ok((text, move_lines)) => {
+                    let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+                    let mut line_moves = vec![None; lines.len()];
+                    for (movement, line) in move_lines.iter().enumerate() {
+                        if let Some(slot) = line.and_then(|line| line_moves.get_mut(line)) {
+                            *slot = Some(movement);
+                        }
+                    }
+                    view.nc = Some(NcPreview { revision, setup, text, lines, move_lines, line_moves, follow: true, followed: None });
                     view.show_nc = true;
                     view.show = true;
                     view.error = None;
@@ -195,38 +210,76 @@ pub fn active(app: &SolveApp) -> bool {
     state.machining.show && state.machining.preview.as_ref().is_some_and(|(_, id, _)| selected.is_some_and(|s| &s.id == id))
 }
 
-pub(super) fn nc_panel(ui: &mut egui::Ui, view: &View, revision: u64, setup: &str) {
-    let Some(nc) = &view.nc else {
+pub(super) fn nc_panel(ui: &mut egui::Ui, view: &mut View, revision: u64, setup: &str, movement: Option<usize>) -> Option<usize> {
+    let linked = !view.draft_preview && view.preview.as_ref().is_some_and(|(r, id, _)| *r == revision && id == setup);
+    let Some(nc) = &mut view.nc else {
         ui.label("工程を決めて、NCを表示してください。");
-        return;
+        return None;
     };
     if nc.revision != revision || nc.setup != setup {
         ui.colored_label(Tokens::get().warning, tr("cam.path_stale"));
-        return;
+        return None;
     }
     if ui_kit::button(ui, tr("cam.path_nc_copy"), ui_kit::Button::Small).clicked() {
         ui.ctx().copy_text(nc.text.clone());
     }
     ui.small(tr("cam.path_review_only"));
+    let current_line =
+        movement.filter(|_| linked).and_then(|index| nc.move_lines.get(index)).copied().flatten().filter(|line| *line < nc.lines.len());
+    if ui_kit::checkbox(ui, tr("cam.nc_follow"), &mut nc.follow).changed() && nc.follow {
+        nc.followed = None;
+    }
+    if !linked {
+        ui.colored_label(Tokens::get().warning, tr("cam.path_recalculate"));
+    } else if movement.is_some() && current_line.is_none() {
+        ui.small(tr("cam.nc_unemitted_move"));
+    }
     let height = ui.text_style_height(&egui::TextStyle::Monospace);
-    egui::ScrollArea::both().id_salt("cam_review_nc").show_rows(ui, height, nc.lines.len(), |ui, rows| {
+    let mut scroll = egui::ScrollArea::both().id_salt("cam_review_nc");
+    if nc.follow && nc.followed != current_line {
+        if let Some(line) = current_line {
+            let row_height = height + ui.spacing().item_spacing.y;
+            scroll = scroll.vertical_scroll_offset((line as f32 * row_height - ui.available_height() * 0.35).max(0.));
+        }
+        nc.followed = current_line;
+    }
+    let mut selected = None;
+    scroll.show_rows(ui, height, nc.lines.len(), |ui, rows| {
         for i in rows {
             if let Some(line) = nc.lines.get(i) {
-                ui.add(egui::Label::new(egui::RichText::new(line).monospace()).wrap_mode(egui::TextWrapMode::Extend));
+                let active = current_line == Some(i);
+                let t = Tokens::get();
+                let text = egui::RichText::new(format!("{:>5}  {line}", i + 1)).monospace();
+                let text = if active { text.background_color(t.accent_soft).color(t.text) } else { text.color(t.text) };
+                let response = ui.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Extend).sense(egui::Sense::click()));
+                if active {
+                    crate::scenario::publish_rect("cam_nc_current_line", response.rect);
+                }
+                if let Some(movement) = nc.line_moves.get(i).copied().flatten().filter(|_| linked) {
+                    crate::scenario::publish_handle(&format!("cam_nc_move_{movement}"), response.rect.center());
+                    if response.clicked() {
+                        selected = Some(movement);
+                    }
+                }
             }
         }
     });
+    selected
 }
 
 pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
-    egui::Frame::new().fill(Tokens::get().panel).inner_margin(12.0).show(ui, |ui| {
-        ui.set_min_size(ui.available_size());
-        contents(app, ui);
-    });
+    ui_kit::Container::new(ui.ctx(), ui_kit::Surface::Canvas)
+        .frame(ui.ctx(), Tokens::get().panel, crate::frame::Side::Left)
+        .inner_margin(Tokens::get().space_12)
+        .show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            contents(app, ui);
+        });
 }
 
 pub(super) fn contents(app: &mut SolveApp, ui: &mut egui::Ui) {
     let t = Tokens::get();
+    let movement = super::simulation_ui::current_move(&app.turning_workspace);
     let view = &mut app.turning_workspace.machining;
     let Some((revision, _, path)) = &view.preview else { return };
     if *revision != app.session.revision {
@@ -244,6 +297,8 @@ pub(super) fn contents(app: &mut SolveApp, ui: &mut egui::Ui) {
             ui.label(tr("cam.path_stale"));
             return;
         }
+        let setup = nc.setup.clone();
+        let revision = *revision;
         ui.horizontal(|ui| {
             ui.heading(tr("cam.path_nc_view"));
             let response = ui_kit::button(ui, tr("cam.path_back_paths"), ui_kit::Button::Normal);
@@ -251,21 +306,13 @@ pub(super) fn contents(app: &mut SolveApp, ui: &mut egui::Ui) {
             if response.clicked() {
                 view.show_nc = false;
             }
-            if ui_kit::button(ui, tr("cam.path_nc_copy"), ui_kit::Button::Normal).clicked() {
-                ui.ctx().copy_text(nc.text.clone());
-            }
         });
-        ui.label(tr("cam.path_review_only"));
-        ui.separator();
-        // Only lay out visible lines, even for a 20,000-move program.
-        let height = ui.text_style_height(&egui::TextStyle::Monospace);
-        egui::ScrollArea::both().id_salt("turning_nc_text").show_rows(ui, height, nc.lines.len(), |ui, rows| {
-            for index in rows {
-                if let Some(line) = nc.lines.get(index) {
-                    ui.add(egui::Label::new(egui::RichText::new(line).monospace()).wrap_mode(egui::TextWrapMode::Extend));
-                }
-            }
-        });
+        if let Some(index) = nc_panel(ui, view, revision, &setup, movement) {
+            view.step = index;
+            view.before_move = Some(index);
+            app.turning_workspace.simulation.focus_contact = None;
+            app.turning_workspace.spatial.playing = false;
+        }
         return;
     }
     ui.horizontal_wrapped(|ui| {

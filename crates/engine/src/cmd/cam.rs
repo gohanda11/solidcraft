@@ -10,12 +10,16 @@ use crate::params::bad;
 use crate::{Result, Session};
 
 pub static COMMANDS: &[CommandSpec] = &[
-    CommandSpec::new("cam.turning.selection.preview", "Preview Selected Contour Operation", selection_preview).icon("inspect").doc_only().noundo()
+    CommandSpec::new("cam.turning.selection.preview", "Preview Selected Contour Operation", selection_preview).icon("inspect").noundo()
         .params("setup, station, contour, expected_revision. Proposes rough/finish from allowances, plans the preceding operations and selected range. Does not mutate the document."),
-    CommandSpec::new("cam.turning.selection.add", "Add Selected Contour Operation", selection_add).icon("new").doc_only()
+    CommandSpec::new("cam.turning.selection.add", "Add Selected Contour Operation", selection_add).icon("new")
         .params("Same request as selection.preview. Recalculates and atomically inserts the reviewed operations. Rejects a stale revision. Undoable."),
-    CommandSpec::new("cam.turning.difference", "Inspect Stock Difference", difference).icon("inspect").doc_only().noundo()
-        .params("setup, expected_revision, remaining?: false. Conservative nominal axial stock cells and approximate excess volume; initial stock or after all supported operations."),
+    CommandSpec::new("cam.turning.selection.update.preview", "Preview Updated Contour Range", selection_update_preview).icon("inspect").noundo()
+        .params("setup, operation, first, last, expected_revision. Rebinds an existing Contour operation to current profile endpoints without changing its identity, tool, conditions or order. Calculates the entire replacement setup and returns a Proposal. Read-only; stale revisions and other invalid operations are rejected."),
+    CommandSpec::new("cam.turning.selection.update", "Update Selected Contour Range", selection_update).icon("settings")
+        .params("setup, operation, first, last, expected_revision, range_only?: false. Updates only an existing Contour range, profile/source snapshot and shared placement at its original index. Normally recalculates the full setup before saving. Explicit range_only:true saves a locally validated draft without full path calculation, allowing other stale ranges to be repaired separately. Never falls back automatically; returns needs_recalculation:true. Undoable."),
+    CommandSpec::new("cam.turning.difference", "Inspect Stock Difference", difference).icon("inspect").noundo()
+        .params("setup, expected_revision, remaining?: false. Conservative nominal axial stock cells and approximate excess volume; initial stock or after all supported operations. Also reports initial material shortage regions and analytic missing volume for a known complete target section."),
     CommandSpec::new("cam.turning.tool_cad.import", "Add STEP to Job Tool Library", library_cad_import).icon("import").doc_only()
         .params("kind: holder or insert, model, path: .step/.stp, expected_revision. Saves an unmounted display model in the current job library. Replaces the same kind/model; does not change turret assignments, cutting dimensions or collision geometry. Undoable."),
     CommandSpec::new("cam.turning.catalog.custom", "Register Manual Tool Models", catalogue_custom).icon("settings").doc_only()
@@ -28,18 +32,18 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("No parameters. Curated Kyocera dimensional references, sources and check date. No manufacturer CAD or grade/cutting-condition certification."),
     CommandSpec::new("cam.turning.catalog.apply", "Assign Catalogue Tool", catalogue_apply).icon("settings").doc_only()
         .params("setup, station, expected_revision, selection: {insert: model or null, holder: model or null}. Replaces catalogue selection atomically, checks OD/ID and seat compatibility, applies insert dimensions, clears changed holder geometry and never confirms mounting. Undoable."),
-    CommandSpec::new("cam.turning.simulate", "Simulate Turning Cutting and Holders", simulate).icon("play").doc_only().noundo()
+    CommandSpec::new("cam.turning.simulate", "Simulate Turning Cutting and Holders", simulate).icon("play").noundo()
         .params("setup, expected_revision, resolution_mm?: 0.1 (0.1..2). Regenerates paths; optional rounded-triangle sweeps replay stock cutting at axial slice midpoints. No automatic nose compensation. Checks confirmed holder envelopes against pre-move stock and the chuck-front half-space. Returns insert/nominal stations, contact candidates and missing holders. Not machine verification."),
     CommandSpec::new("cam.turning.range", "Set Turning End Plane", cut_range).icon("settings").doc_only()
         .params("setup, end_z_mm: negative Z or null for the full profile, expected_revision. Shared OD/ID cut end from front Z0. Validated, undoable; full source profile is retained for model-change detection."),
-    CommandSpec::new("cam.turning.profile", "Read Turning Profile from Model", profile).icon("inspect").doc_only().noundo()
+    CommandSpec::new("cam.turning.profile", "Read Turning Profile from Model", profile).icon("inspect").noundo()
         .params("body: evaluated body name, reverse?: false, inner?: false. Recognizes coaxial cylinders/cones/circular fillets and perpendicular planes; returns exterior or through-bore profile, front frame and revision without changing the plan. Other geometry is refused."),
-    CommandSpec::new("cam.turning.profile.apply", "Use Model Turning Profile", apply_profile).icon("settings").doc_only()
+    CommandSpec::new("cam.turning.profile.apply", "Use Model Turning Profile", apply_profile).icon("settings")
         .params("body, reverse?: false, inner?: false, all?: false, setup, expected_revision, create_operations?: true. all extracts a closed outer/front/inner/back section atomically without adding operations; solid regions close on the axis, blind inner regions are display-only. Otherwise replaces only OD or ID; first ID apply can insert rough/finish operations. Preserves cutting conditions and stock. Undoable."),
-    CommandSpec::new("cam.turning.toolpath", "Calculate Turning Toolpath", toolpath).icon("inspect").doc_only().noundo()
+    CommandSpec::new("cam.turning.toolpath", "Calculate Turning Toolpath", toolpath).icon("inspect").noundo()
         .params("setup: setup id. Calculates configured face/OD/ID profiles, axial drilling and rectangular OD groove rough/finish in operation order. All roughing and drilling precede finishing. ID needs an existing bore or an earlier drill reaching the full profile depth. Nominal cutting references; no automatic nose compensation."),
-    CommandSpec::new("cam.turning.nc", "Export Turning Review NC", nc).icon("export").doc_only().noundo()
-        .params("setup: id, expected_revision: current session revision, path?: .nc file, overwrite?: false. Regenerates DISARMED review NC using setup.post (NL conversational-reference dialect) or the legacy fragment. Never machine-ready. Rejects stale review and unsupported operations."),
+    CommandSpec::new("cam.turning.nc", "Export Turning Review NC", nc).icon("export").noundo()
+        .params("setup: id, expected_revision: current session revision, path?: .nc file, overwrite?: false. Regenerates DISARMED review NC using setup.post (NL conversational-reference dialect) or the legacy fragment. Returns text and move_lines, one zero-based NC line index per planned move (null for an unemitted transfer). Never machine-ready. Rejects stale review and unsupported operations."),
     CommandSpec::new("cam.turning.defaults", "Turning Plan Template", defaults).icon("settings")
         .doc_only()
         .noundo()
@@ -80,9 +84,117 @@ fn selection_add(s: &mut Session, p: &Value) -> Result<Value> {
     let mut plan = s.doc.turning.as_deref().cloned().ok_or_else(|| bad("cam.turning.selection.add", "missing plan"))?;
     let setup = plan.setups.iter_mut().find(|t| t.id == req.setup).ok_or_else(|| bad("cam.turning.selection.add", "missing setup"))?;
     setup.operations.splice(proposal.insert_at..proposal.insert_at, proposal.operations.clone());
+    let revision = revision_after_plan_set(s, &plan, "cam.turning.selection.add")?;
     set(s, &json!({"plan":plan}))?;
-    Ok(json!({"revision":s.revision,"insert_at":proposal.insert_at,"count":proposal.operations.len()}))
+    Ok(json!({"revision":revision,"insert_at":proposal.insert_at,"count":proposal.operations.len()}))
 }
+
+fn revision_after_plan_set(s: &Session, plan: &TurningPlan, cmd: &str) -> Result<u64> {
+    // These commands change only CAM metadata once. Session::execute refreshes after the
+    // handler returns, advancing the revision by one; an equal plan leaves the document
+    // untouched. Return that committed revision so callers can chain the next review.
+    if s.doc.turning.as_deref() == Some(plan) { Ok(s.revision) } else { s.revision.checked_add(1).ok_or_else(|| bad(cmd, "revision limit reached")) }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectionRangeRequest {
+    setup: String,
+    operation: String,
+    first: usize,
+    last: usize,
+    expected_revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectionUpdateRequest {
+    setup: String,
+    operation: String,
+    first: usize,
+    last: usize,
+    expected_revision: u64,
+    #[serde(default)]
+    range_only: bool,
+}
+
+fn selection_range_candidate(s: &Session, req: &SelectionRangeRequest, cmd: &str) -> Result<(TurningPlan, usize, usize)> {
+    use solidcraft_doc::cam::machining::sequence::{Cutting, Limits};
+    if req.expected_revision != s.revision {
+        return Err(bad(cmd, "モデル・工程が変わりました。現在の輪郭から範囲を選び直してください"));
+    }
+    let mut plan = s.doc.turning.as_deref().cloned().ok_or_else(|| bad(cmd, "missing plan"))?;
+    let setup_index = plan.setups.iter().position(|setup| setup.id == req.setup).ok_or_else(|| bad(cmd, "setup not found"))?;
+    let setup = plan.setups.get_mut(setup_index).ok_or_else(|| bad(cmd, "setup not found"))?;
+    validate_sources(s, setup)?;
+    let index = setup.operations.iter().position(|operation| operation.id == req.operation).ok_or_else(|| bad(cmd, "operation not found"))?;
+    let mut operation = setup.operations.get(index).cloned().ok_or_else(|| bad(cmd, "operation not found"))?;
+    let Some(Cutting::Contour(contour)) = operation.cutting.as_mut() else {
+        return Err(bad(cmd, "範囲の更新は輪郭点から作成した工程だけに対応しています"));
+    };
+    let job = (if contour.inner { &setup.id_job } else { &setup.od_job }).as_ref().ok_or_else(|| bad(cmd, "現在の加工輪郭がありません"))?;
+    let common = setup.od_job.as_ref().or(setup.id_job.as_ref()).ok_or_else(|| bad(cmd, "共通配置がありません"))?;
+    contour.first = req.first;
+    contour.last = req.last;
+    contour.profile_snapshot = job.profile.clone();
+    contour.source_snapshot = job.model_source.clone();
+    contour.limits =
+        Limits { stock_front_z_mm: common.stock_front_z_mm, chuck_front_z_mm: common.chuck_front_z_mm, clearance_mm: common.clearance_mm };
+    contour.validate(operation.kind).map_err(|e| bad(cmd, e.to_string()))?;
+    contour.points(setup).map_err(|e| bad(cmd, e.to_string()))?;
+    *setup.operations.get_mut(index).ok_or_else(|| bad(cmd, "operation not found"))? = operation;
+    plan.validate().map_err(|e| bad(cmd, e.to_string()))?;
+    Ok((plan, setup_index, index))
+}
+
+fn selection_range_proposal(
+    plan: &TurningPlan,
+    setup_index: usize,
+    index: usize,
+    cmd: &str,
+) -> Result<solidcraft_doc::cam::machining::selection::Proposal> {
+    use solidcraft_doc::cam::machining::{selection, sequence};
+    let setup = plan.setups.get(setup_index).ok_or_else(|| bad(cmd, "setup not found"))?;
+    let operation = setup.operations.get(index).cloned().ok_or_else(|| bad(cmd, "operation not found"))?;
+    let path = sequence::calculate(setup).map_err(|e| bad(cmd, e.to_string()))?;
+    let residual = selection::remaining(setup).map_err(|e| bad(cmd, e.to_string()))?;
+    Ok(selection::Proposal { operations: vec![operation], insert_at: index, rough_then_finish: false, path, residual })
+}
+
+fn selection_update_preview(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "cam.turning.selection.update.preview";
+    let req: SelectionRangeRequest = serde_json::from_value(p.clone()).map_err(|e| bad(cmd, e.to_string()))?;
+    let (plan, setup_index, index) = selection_range_candidate(s, &req, cmd)?;
+    let proposal = selection_range_proposal(&plan, setup_index, index, cmd)?;
+    Ok(json!({"revision":s.revision,"setup":req.setup,"operation":req.operation,"proposal":proposal}))
+}
+
+fn selection_update(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "cam.turning.selection.update";
+    let req: SelectionUpdateRequest = serde_json::from_value(p.clone()).map_err(|e| bad(cmd, e.to_string()))?;
+    let range_only = req.range_only;
+    let req = SelectionRangeRequest {
+        setup: req.setup,
+        operation: req.operation,
+        first: req.first,
+        last: req.last,
+        expected_revision: req.expected_revision,
+    };
+    let (plan, setup_index, index) = selection_range_candidate(s, &req, cmd)?;
+    let proposal = if range_only {
+        None
+    } else {
+        Some(serde_json::to_value(selection_range_proposal(&plan, setup_index, index, cmd)?).map_err(|e| bad(cmd, e.to_string()))?)
+    };
+    let revision = revision_after_plan_set(s, &plan, cmd)?;
+    set(s, &json!({"plan":plan}))?;
+    let mut reply = json!({"revision":revision,"setup":req.setup,"operation":req.operation,"index":index,"insert_at":index,"range_only":range_only,"needs_recalculation":true});
+    if let Some(proposal) = proposal {
+        reply["proposal"] = proposal;
+    }
+    Ok(reply)
+}
+
 fn difference(s: &mut Session, p: &Value) -> Result<Value> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -431,6 +543,27 @@ fn check_source(s: &Session, job: &solidcraft_doc::cam::machining::OdJob, inner:
     Ok(())
 }
 
+fn check_section_source(s: &Session, setup: &solidcraft_doc::cam::Setup) -> Result<()> {
+    use solidcraft_doc::cam::{drawing::simplified, machining::ProfilePoint};
+    let Some(drawing) = &setup.drawing else { return Ok(()) };
+    let Some(source) = setup.od_job.iter().chain(&setup.id_job).find_map(|job| job.model_source.as_ref()) else { return Ok(()) };
+    let cmd = "cam.turning.toolpath";
+    let world = s.world_state();
+    let body = world.body(&source.body).ok_or_else(|| bad(cmd, "source body no longer exists; select a model"))?;
+    let outline = solidcraft_kernel::turning_section_inner_outline(&body.body, source.reverse).map_err(|e| bad(cmd, e.to_string()))?;
+    let points: Vec<_> = outline.points.into_iter().map(|(z_mm, diameter_mm)| ProfilePoint { z_mm, diameter_mm }).collect();
+    let points = simplified(&points);
+    let saved = simplified(&drawing.inner);
+    // Collinear splits and segment tolerances are annotations, not a model change.
+    // Blind/solid sections have no ID job, so their saved boundary needs its own check.
+    if points.len() != saved.len()
+        || points.iter().zip(&saved).any(|(a, b)| (a.z_mm - b.z_mm).abs() > 1e-6 || (a.diameter_mm - b.diameter_mm).abs() > 1e-6)
+    {
+        return Err(bad(cmd, "model inner section changed since import; read and apply the complete model section again"));
+    }
+    Ok(())
+}
+
 fn validate_sources(s: &Session, setup: &solidcraft_doc::cam::Setup) -> Result<()> {
     if setup.drawing.as_ref().is_some_and(|d| d.segments.iter().any(|s| s.thread_pitch_mm.is_some())) {
         return Err(bad("cam.turning.toolpath", "ねじ指定があります。ねじの工具経路は未対応です。円筒としてのNC出力を停止しました"));
@@ -450,6 +583,7 @@ fn validate_sources(s: &Session, setup: &solidcraft_doc::cam::Setup) -> Result<(
     {
         return Err(bad("cam.turning.toolpath", "OD and ID must use the same model, axis and front face"));
     }
+    check_section_source(s, setup)?;
     Ok(())
 }
 
@@ -522,12 +656,13 @@ fn nc(s: &mut Session, p: &Value) -> Result<Value> {
     if setup.ending != solidcraft_doc::cam::drawing::Ending::Clamped {
         return Err(bad("cam.turning.nc", "裏返し・突っ切りの終了方針が指定されていますが、その経路は未対応です。完了したNCとして出力できません"));
     }
-    let text = if let Some(post) = &setup.post {
-        solidcraft_doc::cam::post::review_nc(setup, post)
+    let program = if let Some(post) = &setup.post {
+        solidcraft_doc::cam::post::review_program(setup, post)
     } else {
-        solidcraft_doc::cam::machining::review_nc(&path)
+        solidcraft_doc::cam::machining::review_program(&path)
     }
     .map_err(|e| bad("cam.turning.nc", e.to_string()))?;
+    let text = program.text;
     if let Some(destination) = &req.path {
         if destination.len() > 4096 || destination.chars().any(char::is_control) || !destination.to_ascii_lowercase().ends_with(".nc") {
             return Err(bad("cam.turning.nc", "a bounded .nc destination is required"));
@@ -552,7 +687,7 @@ fn nc(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     Ok(
-        json!({"text":text,"path":req.path,"machine_ready":false,"disarmed":true,"revision":s.revision,"dialect":if setup.post.is_some(){"mori_nl_conversational_reference"}else{"legacy_review"},"scope":"configured_face_od_id_drilling_od_grooves"}),
+        json!({"text":text,"move_lines":program.move_lines,"path":req.path,"machine_ready":false,"disarmed":true,"revision":s.revision,"dialect":if setup.post.is_some(){"mori_nl_conversational_reference"}else{"legacy_review"},"scope":"configured_face_od_id_drilling_od_grooves"}),
     )
 }
 
@@ -618,6 +753,13 @@ mod tests {
         assert!(text.contains("G0X-") && text.contains("G96S150.000M3"));
         assert_eq!(result["dialect"], "mori_nl_conversational_reference");
         assert_eq!(result["machine_ready"], false);
+        let path = calculate(&s, "setup-1").unwrap();
+        let mapped: Vec<Option<usize>> = serde_json::from_value(result["move_lines"].clone()).unwrap();
+        assert_eq!(mapped.len(), path.moves.len());
+        let lines: Vec<_> = text.lines().collect();
+        for line in mapped.into_iter().flatten() {
+            assert!(lines[line].starts_with("G0X") || lines[line].starts_with("G1X"));
+        }
         assert_eq!(s.revision, revision, "export remains read-only");
         let mut plan = s.doc.turning.as_deref().unwrap().clone();
         plan.setups[0].post.as_mut().unwrap().x_side = XSide::Positive;
@@ -657,13 +799,260 @@ mod tests {
         assert_eq!(p["proposal"]["rough_then_finish"], true);
         assert_eq!(s.doc.turning, before);
         assert_eq!(s.revision, revision);
-        s.execute("cam.turning.selection.add", &request).unwrap();
+        let added = s.execute("cam.turning.selection.add", &request).unwrap();
+        assert_eq!(added["revision"], json!(s.revision));
+        s.execute("cam.turning.nc", &json!({"setup":"setup-1","expected_revision":added["revision"]})).unwrap();
         assert_eq!(s.doc.turning.as_ref().unwrap().setups[0].operations.len(), 2);
         assert!(s.execute("cam.turning.selection.add", &request).is_err());
         assert_eq!(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap().turning, s.doc.turning);
         assert!(s.execute("cam.turning.toolpath", &json!({"setup":"setup-1"})).is_ok());
         s.execute("edit.undo", &json!({})).unwrap();
         assert_eq!(s.doc.turning, before);
+    }
+
+    fn range_update_example() -> Session {
+        use solidcraft_doc::cam::{
+            Operation, OperationKind,
+            machining::{
+                selection::Contour,
+                sequence::{Cutting, Limits},
+            },
+            post::{SpeedMode, Spindle},
+        };
+        let mut s = path_example();
+        s.execute("cam.turning.profile.apply", &json!({"body":"段付き軸","setup":"setup-1","all":true,"expected_revision":s.revision})).unwrap();
+        let mut plan = s.doc.turning.as_deref().unwrap().clone();
+        let setup = &mut plan.setups[0];
+        let job = setup.od_job.as_ref().unwrap();
+        let contour = Contour {
+            limits: Limits { stock_front_z_mm: job.stock_front_z_mm, chuck_front_z_mm: job.chuck_front_z_mm, clearance_mm: job.clearance_mm },
+            inner: false,
+            first: 0,
+            last: job.profile.len() - 1,
+            profile_snapshot: job.profile.clone(),
+            source_snapshot: job.model_source.clone(),
+            radial_leave_mm: 0.15,
+            axial_leave_mm: 0.12,
+            depth_mm: 1.7,
+            feed_mm_rev: 0.123,
+        };
+        let operation = Operation {
+            id: "range-target".into(),
+            name: "Keep this operation name".into(),
+            kind: OperationKind::OdRough,
+            station: Some(12),
+            cutting: Some(Cutting::Contour(contour.clone())),
+            spindle: Some(Spindle { mode: SpeedMode::Rpm, speed: 777., max_rpm: 1000 }),
+            manual_separation: None,
+        };
+        let other = Operation {
+            id: "range-other".into(),
+            name: "Later range".into(),
+            cutting: Some(Cutting::Contour(Contour { first: 4, last: 5, ..contour })),
+            ..operation.clone()
+        };
+        setup.operations = vec![setup.operations[0].clone(), operation, other];
+        s.execute("cam.turning.set", &json!({"plan":plan})).unwrap();
+        s.execute("cam.turning.toolpath", &json!({"setup":"setup-1"})).unwrap();
+        s
+    }
+
+    #[test]
+    fn selected_range_update_previews_the_full_replacement_and_preserves_operation_intent() {
+        use solidcraft_doc::cam::machining::{selection::Proposal, sequence::Cutting};
+        let mut s = range_update_example();
+        s.mark_saved();
+        let before = s.doc.turning.as_deref().unwrap().clone();
+        let revision = s.revision;
+        let undo_count = s.undo.len();
+        let request = json!({"setup":"setup-1","operation":"range-target","first":2,"last":3,"expected_revision":revision});
+        let result = s.execute("cam.turning.selection.update.preview", &request).unwrap();
+        let proposal: Proposal = serde_json::from_value(result["proposal"].clone()).unwrap();
+        let mut expected = before.clone();
+        let Some(Cutting::Contour(c)) = &mut expected.setups[0].operations[1].cutting else { panic!("contour fixture") };
+        c.first = 2;
+        c.last = 3;
+        assert_eq!(proposal.operations, vec![expected.setups[0].operations[1].clone()]);
+        assert_eq!(proposal.insert_at, 1);
+        assert!(!proposal.rough_then_finish);
+        assert!(proposal.path.operation_spans.iter().any(|span| span.operation_id == "range-other"), "preview must include later operations");
+        assert!(proposal.residual.remaining_mm3.is_finite());
+        assert_eq!(s.doc.turning.as_deref(), Some(&before));
+        assert_eq!((s.revision, s.undo.len(), s.is_dirty()), (revision, undo_count, false));
+        let saved = s.execute("cam.turning.selection.update", &request).unwrap();
+        assert_eq!(saved["revision"], json!(s.revision));
+        assert_eq!(saved["range_only"], false);
+        assert_eq!(saved["needs_recalculation"], true);
+        assert_eq!(saved["index"], 1);
+        assert_eq!(saved["proposal"]["operations"], result["proposal"]["operations"]);
+        assert_eq!(s.doc.turning.as_deref(), Some(&expected));
+        assert!(s.execute("cam.turning.selection.update", &request).is_err(), "stale revision must not overwrite a newer range");
+        assert_eq!(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap().turning, s.doc.turning);
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.doc.turning.as_deref(), Some(&before));
+        s.execute("edit.redo", &json!({})).unwrap();
+        assert_eq!(s.doc.turning.as_deref(), Some(&expected));
+    }
+
+    #[test]
+    fn selected_range_update_response_revision_chains_to_updates_and_nc_without_advancing_noops() {
+        let mut s = range_update_example();
+        let first = s
+            .execute(
+                "cam.turning.selection.update",
+                &json!({"setup":"setup-1","operation":"range-target","first":2,"last":3,"expected_revision":s.revision}),
+            )
+            .unwrap();
+        assert_eq!(first["revision"], json!(s.revision));
+        s.execute("cam.turning.nc", &json!({"setup":"setup-1","expected_revision":first["revision"]})).unwrap();
+        let mut next = json!({"setup":"setup-1","operation":"range-target","first":0,"last":5,"expected_revision":first["revision"]});
+        let second = s.execute("cam.turning.selection.update", &next).unwrap();
+        assert_eq!(second["revision"], json!(s.revision));
+        s.execute("cam.turning.nc", &json!({"setup":"setup-1","expected_revision":second["revision"]})).unwrap();
+        next["expected_revision"] = second["revision"].clone();
+        let (revision, undo_count) = (s.revision, s.undo.len());
+        let noop = s.execute("cam.turning.selection.update", &next).unwrap();
+        assert_eq!(noop["revision"], second["revision"]);
+        assert_eq!((s.revision, s.undo.len()), (revision, undo_count));
+        next["range_only"] = json!(true);
+        let noop = s.execute("cam.turning.selection.update", &next).unwrap();
+        assert_eq!(noop["revision"], json!(revision));
+        assert_eq!((s.revision, s.undo.len()), (revision, undo_count));
+        s.revision = u64::MAX;
+        let mut changed = s.doc.turning.as_deref().unwrap().clone();
+        assert_eq!(revision_after_plan_set(&s, &changed, "test").unwrap(), u64::MAX);
+        changed.material.push_str("changed");
+        assert!(revision_after_plan_set(&s, &changed, "test").is_err());
+    }
+
+    #[test]
+    fn selected_range_update_repairs_multiple_stale_ranges_only_with_explicit_draft_save() {
+        use solidcraft_doc::cam::machining::{ProfilePoint, sequence::Cutting};
+        let mut s = range_update_example();
+        let mut stale = s.doc.turning.as_deref().unwrap().clone();
+        let job = stale.setups[0].od_job.as_mut().unwrap();
+        job.profile.insert(1, ProfilePoint { z_mm: -10., diameter_mm: 20. });
+        job.clearance_mm = 3.;
+        s.execute("cam.turning.set", &json!({"plan":stale})).unwrap();
+        let before = s.doc.turning.clone();
+        let revision = s.revision;
+        let undo_count = s.undo.len();
+        let mut first = json!({"setup":"setup-1","operation":"range-target","first":0,"last":6,"expected_revision":revision});
+        for command in ["cam.turning.selection.update.preview", "cam.turning.selection.update"] {
+            assert!(s.execute(command, &first).is_err(), "other stale ranges must prevent a full calculation");
+            assert_eq!(s.doc.turning, before);
+            assert_eq!((s.revision, s.undo.len()), (revision, undo_count));
+        }
+        first["range_only"] = json!(true);
+        let saved = s.execute("cam.turning.selection.update", &first).unwrap();
+        assert_eq!(saved["range_only"], true);
+        assert_eq!(saved["needs_recalculation"], true);
+        assert_eq!(saved["revision"], json!(s.revision));
+        assert!(saved.get("proposal").is_none());
+        let partial = s.doc.turning.as_deref().unwrap().clone();
+        assert_eq!(partial.setups[0].operations[2], stale.setups[0].operations[2]);
+        let mut expected_op = stale.setups[0].operations[1].clone();
+        let Some(Cutting::Contour(c)) = &mut expected_op.cutting else { panic!("contour fixture") };
+        c.first = 0;
+        c.last = 6;
+        c.profile_snapshot = stale.setups[0].od_job.as_ref().unwrap().profile.clone();
+        c.limits.clearance_mm = 3.;
+        assert_eq!(partial.setups[0].operations[1], expected_op);
+        assert!(s.execute("cam.turning.toolpath", &json!({"setup":"setup-1"})).is_err());
+        assert!(s.execute("cam.turning.nc", &json!({"setup":"setup-1","expected_revision":s.revision})).is_err());
+        let second = json!({"setup":"setup-1","operation":"range-other","first":5,"last":6,"expected_revision":saved["revision"]});
+        s.execute("cam.turning.selection.update.preview", &second).unwrap();
+        s.execute("cam.turning.selection.update", &second).unwrap();
+        assert_eq!(s.doc.turning.as_ref().unwrap().setups[0].operations[1], expected_op);
+        s.execute("cam.turning.toolpath", &json!({"setup":"setup-1"})).unwrap();
+        s.execute("cam.turning.nc", &json!({"setup":"setup-1","expected_revision":s.revision})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.doc.turning.as_deref(), Some(&partial));
+    }
+
+    #[test]
+    fn selected_range_update_draft_still_rejects_invalid_ranges_whole_operations_and_stale_model_sources() {
+        let mut s = range_update_example();
+        let before = s.doc.turning.clone();
+        let revision = s.revision;
+        let undo_count = s.undo.len();
+        for (operation, first, last) in [("op-1", 0, 1), ("missing", 0, 1), ("range-target", 3, 2), ("range-target", 0, usize::MAX)] {
+            let request = json!({"setup":"setup-1","operation":operation,"first":first,"last":last,"expected_revision":revision,"range_only":true});
+            assert!(s.execute("cam.turning.selection.update", &request).is_err());
+            assert_eq!(s.doc.turning, before);
+            assert_eq!((s.revision, s.undo.len()), (revision, undo_count));
+        }
+        let extra = json!({"setup":"setup-1","operation":"range-target","first":0,"last":1,"expected_revision":revision,"range_only":true});
+        assert!(s.execute("cam.turning.selection.update.preview", &extra).is_err(), "preview cannot request a draft save");
+        s.execute("solid.move", &json!({"bodies":["段付き軸"],"translate":[3,0,0]})).unwrap();
+        let request = json!({"setup":"setup-1","operation":"range-target","first":0,"last":1,"expected_revision":s.revision,"range_only":true});
+        let count = s.undo.len();
+        assert!(s.execute("cam.turning.selection.update", &request).is_err(), "range-only must not bypass model freshness");
+        assert_eq!(s.doc.turning, before);
+        assert_eq!(s.undo.len(), count);
+    }
+
+    #[test]
+    fn cam_geometry_reads_refresh_live_sketch_results_before_revision_and_source_validation() {
+        use solidcraft_doc::cam::machining::sequence::Cutting;
+        let mut live = range_update_example();
+        live.execute("sketch.edit", &json!({"sketch":"外径輪郭"})).unwrap();
+        live.execute("sketch.drag", &json!({"entity":"l2","from":[-10,10],"to":[-10,11],"live":true})).unwrap();
+        assert!(live.model.is_stale());
+        let saved = live.doc.turning.clone();
+        let setup = &saved.as_ref().unwrap().setups[0];
+        // The cached B-rep still agrees with the old CAM profile until a model reader refreshes.
+        check_source(&live, setup.od_job.as_ref().unwrap(), false).unwrap();
+        let Some(Cutting::Contour(contour)) = &setup.operations[1].cutting else { panic!("contour fixture") };
+        for command in [
+            "cam.turning.toolpath",
+            "cam.turning.nc",
+            "cam.turning.simulate",
+            "cam.turning.difference",
+            "cam.turning.selection.preview",
+            "cam.turning.selection.add",
+            "cam.turning.selection.update.preview",
+            "cam.turning.selection.update",
+            "cam.turning.profile.apply",
+        ] {
+            let mut trial = live.scratch();
+            let revision = trial.revision;
+            let mut request = match command {
+                "cam.turning.toolpath" => json!({"setup":"setup-1"}),
+                "cam.turning.profile.apply" => json!({"setup":"setup-1","body":"段付き軸","all":true,"expected_revision":revision}),
+                "cam.turning.selection.preview" | "cam.turning.selection.add" => {
+                    json!({"setup":"setup-1","station":12,"contour":contour,"expected_revision":revision})
+                }
+                "cam.turning.selection.update.preview" | "cam.turning.selection.update" => {
+                    json!({"setup":"setup-1","operation":"range-target","first":2,"last":3,"expected_revision":revision})
+                }
+                _ => json!({"setup":"setup-1","expected_revision":revision}),
+            };
+            if command == "cam.turning.selection.update" {
+                request["range_only"] = json!(true);
+            }
+            assert!(trial.execute(command, &request).is_err(), "{command} must not use the old live-drag B-rep");
+            assert!(!trial.model.is_stale(), "{command} must refresh before reading geometry");
+            assert_eq!(trial.revision, revision + 1);
+            assert_eq!(trial.doc.turning, saved);
+            if command != "cam.turning.profile.apply" {
+                if request.get("expected_revision").is_some() {
+                    request["expected_revision"] = json!(trial.revision);
+                }
+                let error = trial.execute(command, &request).unwrap_err().to_string();
+                assert!(error.contains("model/profile changed"), "{command} must recheck the fresh shape: {error}");
+            }
+        }
+        let mut read = live.scratch();
+        let revision = read.revision;
+        read.execute("cam.turning.get", &json!({})).unwrap();
+        assert!(read.model.is_stale(), "draft metadata reads remain independent of geometry evaluation");
+        assert_eq!(read.revision, revision);
+        let profile = read.execute("cam.turning.profile", &json!({"body":"段付き軸"})).unwrap();
+        assert!(!read.model.is_stale());
+        assert_eq!(profile["revision"], json!(read.revision));
+        assert!((profile["profile"][0]["diameter_mm"].as_f64().unwrap() - 22.).abs() < 1e-6);
+        assert_eq!(read.doc.turning, saved);
     }
 
     #[test]
@@ -911,6 +1300,80 @@ mod tests {
         s.execute("edit.undo", &json!({})).unwrap();
         s.execute("edit.undo", &json!({})).unwrap();
         assert_eq!(s.doc.turning, original);
+    }
+
+    #[test]
+    fn blind_inner_section_model_change_blocks_stale_drilling_but_preserves_annotations_and_manual_intent() {
+        use solidcraft_doc::cam::{
+            Operation, OperationKind, Stock,
+            drawing::{Drawing, Side},
+            machining::{
+                OdJob, ProfilePoint,
+                sequence::{Cutting, Drill},
+            },
+        };
+        let mut s = Session::default();
+        s.execute("parameters.add", &json!({"name":"depth","expression":"20 mm"})).unwrap();
+        s.execute("solid.cylinder", &json!({"radius":20,"height":60,"body_name":"Blind shaft"})).unwrap();
+        s.execute(
+            "solid.cylinder",
+            &json!({"radius":10,"height":"depth","base":[0,0,"60 mm - depth"],"operation":"cut","targets":["Blind shaft"],"name":"Blind hole"}),
+        )
+        .unwrap();
+        let mut plan = TurningPlan::nl2500();
+        plan.setups[0].stock = Some(Stock { outer_diameter_mm: 44., inner_diameter_mm: 0., length_mm: 65. });
+        plan.setups[0].od_job = Some(OdJob { stock_front_z_mm: 1., chuck_front_z_mm: -70., clearance_mm: 2., ..OdJob::default() });
+        plan.setups[0].operations = vec![Operation {
+            id: "blind-drill".into(),
+            name: "Blind drill".into(),
+            kind: OperationKind::Drill,
+            station: Some(2),
+            cutting: Some(Cutting::Drill(Drill { diameter_mm: 10., tip_end_z_mm: -18., feed_mm_rev: 0.1, ..Drill::default() })),
+            spindle: None,
+            manual_separation: None,
+        }];
+        s.execute("cam.turning.set", &json!({"plan":plan})).unwrap();
+        s.execute("cam.turning.profile.apply", &json!({"body":"Blind shaft","setup":"setup-1","all":true,"expected_revision":s.revision})).unwrap();
+        let mut plan = s.doc.turning.as_deref().unwrap().clone();
+        let setup = &mut plan.setups[0];
+        assert!(setup.id_job.is_none(), "blind holes must not acquire through-bore jobs");
+        let mut inner = setup.drawing.as_ref().unwrap().inner.clone();
+        assert!(inner.iter().any(|p| (p.z_mm + 20.).abs() < 1e-6 && p.diameter_mm.abs() < 1e-6));
+        let (a, b) = (inner[0], inner[1]);
+        inner.insert(1, ProfilePoint { z_mm: (a.z_mm + b.z_mm) * 0.5, diameter_mm: (a.diameter_mm + b.diameter_mm) * 0.5 });
+        let mut drawing = Drawing::new(&setup.od_job.as_ref().unwrap().profile, inner);
+        let segment = drawing.segments.iter_mut().find(|p| p.side == Side::Inner).unwrap();
+        segment.lower_mm = -0.02;
+        segment.upper_mm = 0.03;
+        setup.drawing = Some(drawing);
+        s.execute("cam.turning.set", &json!({"plan":plan})).unwrap();
+        s.execute("cam.turning.toolpath", &json!({"setup":"setup-1"})).unwrap();
+        s.execute("cam.turning.nc", &json!({"setup":"setup-1","expected_revision":s.revision})).unwrap();
+        assert_eq!(s.doc.turning.as_deref(), Some(&plan), "validation must preserve splits and tolerances");
+        assert_eq!(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap().turning, s.doc.turning);
+
+        let changed = s.execute("parameters.change", &json!({"name":"depth","expression":"10 mm"})).unwrap();
+        assert!(changed["errors"].as_array().unwrap().is_empty(), "{changed}");
+        check_source(&s, plan.setups[0].od_job.as_ref().unwrap(), false).unwrap();
+        for command in ["cam.turning.toolpath", "cam.turning.nc", "cam.turning.simulate", "cam.turning.difference"] {
+            let params = if command == "cam.turning.toolpath" {
+                json!({"setup":"setup-1"})
+            } else {
+                json!({"setup":"setup-1","expected_revision":s.revision})
+            };
+            let error = s.execute(command, &params).unwrap_err().to_string();
+            assert!(error.contains("model inner section changed"), "{command}: {error}");
+        }
+        assert_eq!(s.doc.turning.as_deref(), Some(&plan));
+
+        // Explicit manual geometry remains an independent target even if a CAD body exists.
+        let mut manual = plan.clone();
+        manual.setups[0].od_job.as_mut().unwrap().model_source = None;
+        s.execute("cam.turning.set", &json!({"plan":manual})).unwrap();
+        s.execute("cam.turning.toolpath", &json!({"setup":"setup-1"})).unwrap();
+        s.execute("cam.turning.profile.apply", &json!({"body":"Blind shaft","setup":"setup-1","all":true,"expected_revision":s.revision})).unwrap();
+        let error = s.execute("cam.turning.toolpath", &json!({"setup":"setup-1"})).unwrap_err().to_string();
+        assert!(error.contains("ドリル"), "the old drill must also fail against the re-imported shallow hole: {error}");
     }
 
     #[test]

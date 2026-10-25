@@ -61,7 +61,9 @@ pub(super) fn section_settings(ui: &mut egui::Ui, view: &mut View, bodies: &[Str
         view.attempted = Some(key);
         view.action = Some(Action::Section(setup.id.clone()));
     }
-    if button(ui, "cam_model_read", "外径・内径・端面を再抽出", bodies.contains(&view.body)) {
+    let extracted = setup.drawing.as_ref().is_some_and(|drawing| !drawing.segments.is_empty())
+        || setup.od_job.as_ref().or(setup.id_job.as_ref()).is_some_and(|job| job.profile.len() >= 2);
+    if button(ui, "cam_model_read", if extracted { "cam.profile_extract_again" } else { "cam.profile_extract_first" }, bodies.contains(&view.body)) {
         view.action = Some(Action::Section(setup.id.clone()));
     }
     if button(ui, "cam_model_reverse", "加工方向を反転", bodies.contains(&view.body)) {
