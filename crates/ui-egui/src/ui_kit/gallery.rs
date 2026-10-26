@@ -7,6 +7,7 @@ use egui::{Ui, vec2};
 struct Sample {
     value: String,
     second: String,
+    loaded_number: f64,
     selected: usize,
     checked: bool,
 }
@@ -636,6 +637,12 @@ const ELEMENTS: &[Element] = &[
     element!("number_field", |ui, _| {
         number_field(ui, &mut 3_u32, 1..=200, 1.0, "");
     }),
+    element!("number_field_preserving_value", |ui, s| {
+        row(ui, "Loaded clearance", |ui| {
+            number_field_preserving_value(ui, &mut s.loaded_number, 0.01..=1000.0, 0.1, " mm");
+        });
+        text(ui, "Loaded 0 mm is preserved until edited. New values must be 0.01–1000 mm.", Text::Note("loaded_clearance"));
+    }),
     element!("slider_percent", |ui, _| {
         slider(ui, &mut 1.0, 0.5..=2.5, Slider { step: Some(0.05), format: |v| format!("{:.0} %", v * 100.0), ..Default::default() });
     }),
@@ -1053,7 +1060,7 @@ const ELEMENTS: &[Element] = &[
 ];
 
 fn example(ui: &mut Ui, element: &Element) -> (&'static str, Option<&'static str>) {
-    let mut sample = Sample { value: "12 mm".into(), second: "25 mm".into(), selected: 0, checked: true };
+    let mut sample = Sample { value: "12 mm".into(), second: "25 mm".into(), loaded_number: 0.0, selected: 0, checked: true };
     let rect = ui.scope(|ui| (element.draw)(ui, &mut sample)).response.rect;
     if matches!(element.name, "menu" | "menu_submenu" | "rename_menu" | "workspace_menu" | "command_search" | "history_icons" | "history_names") {
         // A popup's elevation is painted outside its layout rectangle. Reserve those

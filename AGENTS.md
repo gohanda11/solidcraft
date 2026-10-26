@@ -1,5 +1,21 @@
 # SolidCraft — instructions for agents
 
+## CAM fork workflow
+
+This checkout is the owner's turning-CAM fork: `origin` is
+`https://github.com/gohanda11/solidcraft.git`; `upstream` is the original SolidCraft
+repository (the `bherbruck/solidcraft` URL redirects to its current owner).
+Keep fork `main` as the upstream baseline, syncing published upstream commits by
+fast-forward only. Develop CAM on `cam/turning-foundation` or a topic branch and
+open pull requests **in gohanda11/solidcraft** for reviewable differences. Do not
+send CAM work to the upstream repository or merge CAM into the baseline unless
+the owner asks. Upstream contribution/merge-queue instructions below apply only
+when the owner explicitly requests upstream contribution.
+
+Never commit downloaded manufacturer CAD, local designs, control tokens, build
+outputs, backups or review screenshots. See `docs/cam-fork-workflow.md` for the
+local integration and verification procedure.
+
 SolidCraft is a clean-room, open-source, pure-Rust parametric 3D CAD application:
 sketches with a constraint solver, a parametric timeline of features, a B-rep
 kernel, and a desktop UI that agents can drive. Projects published by

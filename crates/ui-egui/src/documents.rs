@@ -33,6 +33,7 @@ pub struct DocSlot {
 #[derive(Clone, Debug, Default)]
 struct DocView {
     render: crate::render_workspace::ViewState,
+    turning: crate::turning_workspace::State,
 }
 
 impl DocSlot {
@@ -80,11 +81,12 @@ impl Documents {
 }
 
 fn take_view(app: &mut SolveApp) -> DocView {
-    DocView { render: std::mem::take(&mut app.render_workspace.view) }
+    DocView { render: std::mem::take(&mut app.render_workspace.view), turning: std::mem::take(&mut app.turning_workspace) }
 }
 
 fn put_view(app: &mut SolveApp, v: DocView) {
     app.render_workspace.view = v.render;
+    app.turning_workspace = v.turning;
     crate::render_workspace::invalidate_images(app);
     crate::render_workspace::invalidate_scene(app);
     crate::render_workspace::sync_backend(app);
@@ -210,6 +212,10 @@ pub fn adopt(app: &mut SolveApp, session: Session) {
         crate::sketch_attachment_ui::clear(app);
         app.session.replace_design(session);
         crate::render_workspace::reset_document(app);
+        app.turning_workspace = crate::turning_workspace::State::default();
+        if crate::turning_workspace::active(app) {
+            app.ui.tab = "MODEL".into();
+        }
         app.session.invalidate_view(rev);
         app.cam = Camera::default();
         app.fit_view();

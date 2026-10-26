@@ -47,6 +47,20 @@ const READ_METHODS: &[&str] = &[
 /// count: they mark the design saved, but change nothing in it.
 const FILE_COMMANDS: &[&str] = &["file.export", "file.save", "file.save_as", "file.save_mesh"];
 
+/// CAM calculation only reads the plan; applying its result is a separate command. Keep this
+/// list explicit so a new CAM command is treated as a change until its effects are known.
+/// `cam.turning.nc` is parameter-dependent and belongs in `command_effect` instead.
+const CAM_READ_COMMANDS: &[&str] = &[
+    "cam.turning.defaults",
+    "cam.turning.difference",
+    "cam.turning.get",
+    "cam.turning.profile",
+    "cam.turning.selection.preview",
+    "cam.turning.selection.update.preview",
+    "cam.turning.simulate",
+    "cam.turning.toolpath",
+];
+
 /// Commands that only read the design (inspection, lists, measurements).
 pub fn command_reads_only(id: &str) -> bool {
     let id = crate::find_command(id).map_or(id, |c| c.id);
@@ -54,15 +68,16 @@ pub fn command_reads_only(id: &str) -> bool {
         || id.starts_with("model.")
         || id.ends_with(".inspect")
         || id.ends_with(".list")
+        || CAM_READ_COMMANDS.contains(&id)
         || matches!(id, "document.inspect" | "engine.commands" | "render.status" | "render.backends" | "render.settings.get" | "file.slicers")
 }
 
 /// What the command `id` with `params` does: an export that is given a `path` (`*.export*`, as
 /// `sketch.export_dxf` or `parameters.export`) or a save writes a file; without a path an export
-/// only answers with its contents.
+/// only answers with its contents. Turning review NC has the same destination-dependent effect.
 pub fn command_effect(id: &str, params: &Value) -> Effect {
     let id = crate::find_command(id).map_or(id, |c| c.id);
-    let exports = id.split('.').skip(1).any(|part| part.starts_with("export"));
+    let exports = id == "cam.turning.nc" || id.split('.').skip(1).any(|part| part.starts_with("export"));
     if FILE_COMMANDS.contains(&id) || (exports && params.get("path").is_some_and(|p| !p.is_null())) {
         Effect::WritesFile
     } else if command_reads_only(id) || exports {
@@ -109,6 +124,67 @@ pub fn describe(method: &str, params: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn cam_previews_read_but_saving_and_importing_still_change_the_design() {
+        for id in [
+            "cam.turning.defaults",
+            "cam.turning.get",
+            "cam.turning.profile",
+            "cam.turning.toolpath",
+            "cam.turning.simulate",
+            "cam.turning.difference",
+            "cam.turning.selection.preview",
+            "cam.turning.selection.update.preview",
+            "cam.tool_catalog.list",
+        ] {
+            assert!(crate::find_command(id).is_some(), "{id} is registered");
+            assert!(command_reads_only(id), "{id}");
+            for (method, key) in [("engine.execute", "command"), ("command", "id")] {
+                let request = json!({key: id, "params": {"setup": "setup-1", "expected_revision": 7}});
+                assert_eq!(effect(method, &request), Effect::ReadsOnly, "{method} {id}");
+                assert!(reads_only(method, &request), "{method} {id}");
+            }
+        }
+        for id in [
+            "cam.turning.set",
+            "cam.turning.range",
+            "cam.turning.profile.apply",
+            "cam.turning.selection.add",
+            "cam.turning.selection.update",
+            "cam.turning.catalog.apply",
+            "cam.turning.catalog.custom",
+            "cam.turning.tool_cad.import",
+            "cam.turning.insert_cad.import",
+            "cam.turning.holder_cad.import",
+            "cam.turning.unknown",
+        ] {
+            assert!(!command_reads_only(id), "{id}");
+            for (method, key) in [("engine.execute", "command"), ("command", "id")] {
+                // Draft range saves still change the plan. Import paths read a file but save
+                // its model into the design, so they must not be classified as file exports.
+                let request = json!({key: id, "params": {"range_only": true, "path": "/tmp/tool.step"}});
+                assert_eq!(effect(method, &request), Effect::Changes, "{method} {id}");
+                assert!(!reads_only(method, &request), "{method} {id}");
+            }
+        }
+    }
+
+    #[test]
+    fn cam_nc_only_writes_when_a_destination_is_requested() {
+        assert!(!command_reads_only("cam.turning.nc"), "NC cannot be classified without its parameters");
+        for (params, expected) in [
+            (json!({"setup": "setup-1", "expected_revision": 7}), Effect::ReadsOnly),
+            (json!({"setup": "setup-1", "expected_revision": 7, "path": null}), Effect::ReadsOnly),
+            (json!({"setup": "setup-1", "expected_revision": 7, "path": "/tmp/review.nc"}), Effect::WritesFile),
+        ] {
+            for (method, key) in [("engine.execute", "command"), ("command", "id")] {
+                let request = json!({key: "cam.turning.nc", "params": params});
+                assert_eq!(effect(method, &request), expected, "{method} {params}");
+                assert_eq!(reads_only(method, &request), expected == Effect::ReadsOnly, "{method} {params}");
+            }
+        }
+    }
 
     #[test]
     fn reads_are_told_from_changes() {
