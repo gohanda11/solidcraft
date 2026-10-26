@@ -322,6 +322,48 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         }
     }
     let selection = &app.turning_workspace.selection;
+    let face_picking = step == 2 && super::selection_ui::face_kind(setup, selection).is_some();
+    let face = (step == 2).then(|| super::selection_ui::front_face(setup)).flatten();
+    let face_hover = face
+        .filter(|_| face_picking)
+        .zip(hover)
+        .is_some_and(|(points, at)| front_face_hit(points.map(map), at, setup.od_job.iter().flat_map(|job| job.profile.iter()).copied().map(map)));
+    let face_selected = step == 2
+        && (app.turning_workspace.operation_draft.as_ref().is_some_and(super::operations_ui::Draft::is_front_face)
+            || (!selection.editing
+                && app.turning_workspace.operation_draft.is_none()
+                && setup
+                    .operations
+                    .get(app.turning_workspace.operation)
+                    .is_some_and(|op| matches!(op.kind, OperationKind::Face | OperationKind::FaceRough | OperationKind::FaceFinish))));
+    if let Some(points) = face
+        && (face_picking || face_selected)
+    {
+        let [outer, axis] = points.map(map);
+        let color = if face_hover || face_selected { t.warning } else { t.text };
+        if face_hover || face_selected {
+            painter.line_segment([outer, axis], Stroke::new(4., color));
+        }
+        painter.circle_filled(axis, 6., t.panel);
+        painter.circle_stroke(axis, 6., Stroke::new(2., color));
+        painter.text(axis + vec2(-8., -10.), Align2::RIGHT_BOTTOM, tr("cam.face_pick"), FontId::proportional(t.font_small), color);
+        if face_selected {
+            crate::scenario::publish_rect("cam_selected_face", Rect::from_two_pos(outer, axis));
+        }
+        if face_picking {
+            crate::scenario::publish_handle("cam_face_x0", axis);
+            crate::scenario::publish_handle("cam_face_span", outer.lerp(axis, 0.5));
+        }
+    }
+    if face_hover
+        && response.clicked()
+        && app.turning_workspace.flat.click_frame != Some(ui.ctx().cumulative_frame_nr())
+        && let Some(plan) = app.session.doc.turning.as_deref()
+    {
+        app.turning_workspace.flat.click_frame = Some(ui.ctx().cumulative_frame_nr());
+        super::selection_ui::pick_face(plan, &mut app.turning_workspace);
+    }
+    let selection = &app.turning_workspace.selection;
     let turning_tool = selection.update.is_some()
         || selection
             .station
@@ -495,6 +537,21 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     };
     let legend = painter.layout(legend.to_owned(), FontId::proportional(t.font_small), t.text_dim, (rect.width() - 24.).max(1.));
     painter.galley(rect.left_bottom() + vec2(12., -12. - legend.size().y), legend, t.text_dim);
+}
+
+/// Preserve the shared OD endpoint for contour picking, while making the face
+/// center clickable even when a small face projects to only a few screen points.
+pub(super) fn front_face_hit([outer, axis]: [egui::Pos2; 2], at: egui::Pos2, mut contour: impl Iterator<Item = egui::Pos2>) -> bool {
+    let axis_distance = at.distance(axis);
+    if contour.any(|point| at.distance(point) <= 6. && at.distance(point) < axis_distance) {
+        return false;
+    }
+    if axis_distance <= 9. && axis_distance <= at.distance(outer) {
+        return true;
+    }
+    let edge = axis - outer;
+    let nearest = outer + edge * ((at - outer).dot(edge) / edge.length_sq().max(1e-6)).clamp(0., 1.);
+    at.distance(outer) > 6. && at.distance(nearest) <= 8.
 }
 
 /// Only the intersection of a finished bore and the real cylindrical stock is removable.

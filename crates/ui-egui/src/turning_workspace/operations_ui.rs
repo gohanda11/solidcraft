@@ -15,6 +15,12 @@ pub(super) struct Draft {
     error: Option<String>,
 }
 
+impl Draft {
+    pub(super) fn is_front_face(&self) -> bool {
+        matches!(self.kind, Some(OperationKind::FaceRough | OperationKind::FaceFinish))
+    }
+}
+
 const GROUPS: &[(&str, &[OperationKind])] = &[
     ("cam.op_group_face", &[OperationKind::FaceRough, OperationKind::FaceFinish]),
     ("cam.profile_od", &[OperationKind::OdRough, OperationKind::OdFinish]),
@@ -81,6 +87,34 @@ pub(super) fn select_tool(draft: &mut Draft, setup: &Setup, station: u8) {
     draft.compact = true;
     draft.name = tr(kind_label(kind)).into();
     draft.group = if matches!(kind, OperationKind::CenterDrill | OperationKind::Drill) { 3 } else { 4 };
+}
+
+/// The front face is a whole-face operation, not an OD contour with an X0 sample.
+/// Reopen existing intent instead of creating a duplicate whole-face operation.
+pub(super) fn open_front_face(plan: &TurningPlan, state: &mut State, station: u8, kind: OperationKind) {
+    if !matches!(kind, OperationKind::FaceRough | OperationKind::FaceFinish) {
+        return;
+    }
+    let existing = plan.setups.get(state.setup).and_then(|setup| {
+        setup.operations.iter().position(|op| op.kind == kind || (kind == OperationKind::FaceRough && op.kind == OperationKind::Face))
+    });
+    if let Some(index) = existing {
+        guided::go(state, 2);
+        state.operation = index;
+        state.section = 2;
+        state.model_profile.inner = false;
+        state.spatial.section = false;
+        state.spatial.operation = Some(kind);
+        return;
+    }
+    open(plan, state);
+    if let Some(draft) = state.operation_draft.as_mut() {
+        draft.group = 0;
+        draft.kind = Some(kind);
+        draft.name = tr(kind_label(kind)).into();
+        draft.station = Some(station);
+        draft.compact = true;
+    }
 }
 
 fn rank(kind: OperationKind) -> u8 {
@@ -228,6 +262,10 @@ pub(super) fn composer(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut St
     }
     ui.add_space(8.);
     if let Some(kind) = draft.kind {
+        if draft.is_front_face() {
+            ui.label(tr("cam.face_pick_scope"));
+            ui.small(tr("cam.face_pick_conditions"));
+        }
         if !compact {
             ui.strong(format!(
                 "{} · {}",
@@ -368,6 +406,9 @@ pub(super) fn selected(ui: &mut egui::Ui, setup: &mut Setup, state: &mut State, 
         return false;
     };
     let kind = op.kind;
+    if matches!(kind, OperationKind::Face | OperationKind::FaceRough | OperationKind::FaceFinish) {
+        ui.label(tr("cam.face_pick_scope"));
+    }
     let separates = |kind| matches!(kind, OperationKind::PartOff | OperationKind::PartingFinish);
     let can_up = state.operation > 0 && !separates(kind);
     let can_down = setup.operations.get(state.operation + 1).is_some_and(|o| !separates(o.kind)) && !separates(kind);

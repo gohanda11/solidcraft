@@ -163,7 +163,7 @@ pub(super) fn tools(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut State
         state.selection.editing = false;
         state.selection.picking = false;
     }
-    ui.small("ダブルクリック：工具を編集\n外径・内径：輪郭点から範囲指定\n穴・溝・端面：右側の寸法設定");
+    ui.small(tr("cam.tool_pick_help"));
 }
 pub(super) fn operations(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut State) {
     let review = state.workflow == 4;
@@ -260,6 +260,38 @@ fn clear_preview(state: &mut State) {
     state.spatial.playing = false;
 }
 
+/// Facing uses the existing whole-front-face planner. X0 is a picking reference;
+/// the actual cut stops at the stock bore when the material is already hollow.
+pub(super) fn front_face(setup: &Setup) -> Option<[cam::machining::ProfilePoint; 2]> {
+    let outer = *setup.od_job.as_ref()?.profile.first()?;
+    if !outer.z_mm.is_finite() || outer.z_mm.abs() > 1e-8 || !outer.diameter_mm.is_finite() || outer.diameter_mm <= 0. {
+        return None;
+    }
+    Some([outer, cam::machining::ProfilePoint { z_mm: 0., diameter_mm: 0. }])
+}
+
+pub(super) fn face_kind(setup: &Setup, view: &View) -> Option<OperationKind> {
+    if !view.editing || !view.picking || view.update.is_some() {
+        return None;
+    }
+    let station = view.station?;
+    let slot = setup.turret.iter().find(|slot| slot.station == station)?;
+    if !matches!(slot.role, ToolRole::OdRough | ToolRole::OdFinish) {
+        return None;
+    }
+    front_face(setup)?;
+    Some(if view.radial == 0. && view.axial == 0. { OperationKind::FaceFinish } else { OperationKind::FaceRough })
+}
+
+pub(super) fn pick_face(plan: &TurningPlan, state: &mut State) {
+    let Some(setup) = plan.setups.get(state.setup) else { return };
+    let Some(kind) = face_kind(setup, &state.selection) else { return };
+    let Some(station) = state.selection.station else { return };
+    clear_preview(state);
+    operations_ui::open_front_face(plan, state, station, kind);
+    state.selection = View::default();
+}
+
 fn contour_conditions(ui: &mut egui::Ui, c: &Contour) {
     ui.small(format!(
         "{} {:.3} / Z {:.3} mm · {} {:.3} mm · F {:.3} mm/rev",
@@ -298,6 +330,7 @@ pub(super) fn settings(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut St
     } else {
         ui.strong(format!("T{station:02}  新しい加工範囲"));
     }
+    let face_available = face_kind(setup, &state.selection).is_some();
     if !turning {
         ui.label("この工具は穴・溝・端面などの寸法を指定して追加します。");
         if button(ui, "cam_tool_local", "この工具で工程を作る", true) {
@@ -332,6 +365,7 @@ pub(super) fn settings(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut St
                 .map_or(format!("{label}：未選択"), |p| format!("{label}：Z {:.3} / Φ {:.3}", p.z_mm, p.diameter_mm)),
         );
     }
+    let mut select_face = false;
     ui.horizontal(|ui| {
         if button(
             ui,
@@ -344,6 +378,9 @@ pub(super) fn settings(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut St
             view.picking = true;
             view.preview = None;
         }
+        if face_available {
+            select_face = button(ui, "cam_select_face", tr("cam.face_pick"), true);
+        }
         if button(ui, "cam_select_reset", "選び直す", true) {
             view.first = None;
             view.last = None;
@@ -351,6 +388,13 @@ pub(super) fn settings(ui: &mut egui::Ui, plan: &mut TurningPlan, state: &mut St
             view.preview = None;
         }
     });
+    if select_face {
+        pick_face(plan, state);
+        return;
+    }
+    if face_available {
+        ui.small(tr("cam.face_pick_hint"));
+    }
     ui.small(tr("cam.range_direction"));
     if !view.picking {
         ui.small(tr("cam.range_preview_locked"));

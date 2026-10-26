@@ -344,6 +344,94 @@ fn local_tool_click_opens_a_draft_without_contour_picking_or_document_changes() 
 }
 
 #[test]
+fn front_face_x0_and_line_pick_add_facing_without_polluting_the_od_profile() {
+    let mut h = Harness::new();
+    h.app.home.open = false;
+    h.call("ui.resize", json!({"width":1280,"height":820}));
+    let script: serde_json::Value = serde_json::from_str(include_str!("../../../../examples/turning-toolpath.json")).unwrap();
+    for c in script["commands"].as_array().unwrap() {
+        h.app.run(c["command"].as_str().unwrap(), c["params"].clone()).unwrap();
+    }
+    let mut plan = h.app.session.doc.turning.as_deref().unwrap().clone();
+    plan.setups[0].operations.retain(|op| !matches!(op.kind, OperationKind::FaceRough | OperationKind::FaceFinish));
+    h.app.run("cam.turning.set", json!({"plan":plan})).unwrap();
+    enter(&mut h.app, "turning").unwrap();
+    click(&mut h, "cam_step_2");
+    click(&mut h, "cam_tool_12");
+    let before = h.app.session.doc.turning.clone();
+    assert_eq!(crate::scenario::handle_at("cam_face_x0"), crate::scenario::handle_at("cam_origin"));
+    // The original OD endpoint remains an OD point; the second click may be X0.
+    click(&mut h, "cam_contour_point_0");
+    assert_eq!(h.app.turning_workspace.selection.first, Some(0));
+    click(&mut h, "cam_face_x0");
+    assert!(h.app.turning_workspace.operation_draft.as_ref().is_some_and(operations_ui::Draft::is_front_face));
+    assert!(crate::scenario::rect_of("cam_selected_face").is_some());
+    let visible = crate::scenario::rect_of("cam_stage_right_scroll").unwrap();
+    assert!(visible.contains_rect(crate::scenario::rect_of("cam_operation_confirm").unwrap()));
+    assert_eq!(h.app.session.doc.turning, before, "picking opens a draft without saving it");
+    click(&mut h, "cam_operation_cancel");
+    assert_eq!(h.app.session.doc.turning, before);
+    click(&mut h, "cam_tool_12");
+    click(&mut h, "cam_face_span");
+    click(&mut h, "cam_operation_confirm");
+    let setup = &h.app.session.doc.turning.as_ref().unwrap().setups[0];
+    assert_eq!(setup.operations[0].kind, OperationKind::FaceRough);
+    assert_eq!(setup.operations[0].station, Some(12));
+    assert_eq!(setup.od_job, before.as_ref().unwrap().setups[0].od_job, "X0 must not become an OD undercut");
+    let after_rough = h.app.session.doc.turning.clone();
+    // Reopening an existing face is read-only, and does not create a duplicate.
+    click(&mut h, "cam_tool_12");
+    click(&mut h, "cam_face_x0");
+    assert!(h.app.turning_workspace.operation_draft.is_none());
+    assert_eq!(h.app.turning_workspace.operation, 0);
+    assert_eq!(h.app.session.doc.turning, after_rough);
+    click(&mut h, "cam_tool_6");
+    click(&mut h, "cam_face_x0");
+    click(&mut h, "cam_operation_confirm");
+    let setup = &h.app.session.doc.turning.as_ref().unwrap().setups[0];
+    assert_eq!(
+        setup.operations.iter().map(|op| op.kind).collect::<Vec<_>>(),
+        vec![OperationKind::FaceRough, OperationKind::OdRough, OperationKind::FaceFinish, OperationKind::OdFinish,]
+    );
+    assert_eq!(setup.operations[2].station, Some(6));
+    let v = h.app.run("cam.turning.toolpath", json!({"setup":"setup-1"})).unwrap();
+    let path: cam::machining::Toolpath = serde_json::from_value(v["toolpath"].clone()).unwrap();
+    for (phase, z) in [(cam::machining::Phase::FaceRough, 0.1), (cam::machining::Phase::FaceFinish, 0.)] {
+        assert!(
+            path.moves
+                .iter()
+                .any(|m| m.phase == phase && m.motion == cam::machining::Motion::Feed && m.to.diameter_mm == 0. && (m.to.z_mm - z).abs() < 1e-8)
+        );
+    }
+    let nc = h.app.run("cam.turning.nc", json!({"setup":"setup-1","expected_revision":h.app.session.revision})).unwrap();
+    assert!(nc["text"].as_str().unwrap().contains("X0"));
+    h.app.run("edit.undo", json!({})).unwrap();
+    assert_eq!(h.app.session.doc.turning, after_rough, "adding a picked face must be undoable");
+    click(&mut h, "cam_tool_12");
+    click(&mut h, "cam_select_face");
+    assert!(h.app.turning_workspace.operation_draft.is_none());
+    assert_eq!(h.app.session.doc.turning, after_rough, "the accessible face button reopens the same operation");
+}
+
+#[test]
+fn front_face_hit_keeps_shared_od_endpoint_and_small_x0_accessible() {
+    use egui::pos2;
+    let hit = |face, at| flat::front_face_hit(face, at, std::iter::empty());
+    let face = [pos2(100., 20.), pos2(100., 100.)];
+    assert!(!hit(face, face[0]));
+    assert!(hit(face, face[1]));
+    assert!(hit(face, pos2(100., 60.)));
+    assert!(!hit(face, pos2(120., 60.)));
+    let small = [pos2(100., 97.), pos2(100., 100.)];
+    assert!(hit(small, small[1]));
+    assert!(hit(small, small[0].lerp(small[1], 0.5)));
+    assert!(!hit(small, small[0]));
+    let nearby_od = pos2(92., 97.);
+    assert!(!flat::front_face_hit(small, nearby_od, [small[0], nearby_od].into_iter()), "a nearby OD point must win over the face's line tolerance");
+    assert!(flat::front_face_hit(small, small[1], [small[0], nearby_od].into_iter()), "the actual X0 reference remains selectable");
+}
+
+#[test]
 fn selection_dense_curves_keep_exact_samples_and_pick_nearest_endpoint() {
     use egui::pos2;
     let curve: Vec<_> = (0..=18)

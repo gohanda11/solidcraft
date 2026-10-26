@@ -4,7 +4,17 @@
 
 ## Local turning CAM extension (2026-10-16)
 
-2026-10-25: integrated upstream `16286249` (0.22.0 and subsequent updates).
+2026-10-26: the operation canvas now picks the front face through its line, the Z0/X0
+reference, or a compact face button. OD rough/finish tools open face rough/finish;
+an existing face operation is reopened without duplication. Facing remains a whole-front-face
+operation using the shared cutting conditions, reaching X0 for solid stock and the raw bore
+for hollow stock. The original OD endpoints and range editing remain separate.
+The final native build and 30 CAM UI tests pass; a four-operation fixture produces 86 moves,
+with facing endpoints X0/Z0.1 (rough) and X0/Z0 (finish). Full `cargo xtask ci` now passes:
+8,006 tests passed, 62 existing tests skipped, plus formatting, assets, licences, lists,
+layers, UI containers, all-target Clippy, 13-crate Wasm, doc tests and web-offline checks.
+
+2026-10-25 (historical validation record): integrated upstream `16286249` (0.22.0 and subsequent updates).
 The working tree based on `5a60736d` passes 80 CAM tests, including insert contact with
 OD/ID shoulders beyond a shortened cutting end; simulation retains the complete target.
 Tool-first hole/groove creation now opens compact confirmation, followed by dimension entry.
@@ -33,8 +43,9 @@ ignored), UI guards (15), and both mesh-export tests running concurrently pass. 
 engine case `seed_81` passes individually. Final fmt/assets/lists/layers/ui-containers,
 all-workspace/all-target Clippy with warnings denied, and 13-crate Wasm checks also pass.
 The final native build succeeds in 2m33s; fresh screenshots and NC export confirm nine operations,
-166 completed moves, matching NC line 300, and the same audited NC hash. Full CI is not green:
-the Vulkan GPU suite and progressive UI GPU test remain incomplete.
+166 completed moves, matching NC line 300, and the same audited NC hash. At that point,
+full CI was incomplete; the Vulkan GPU suite and progressive UI GPU test passed in the
+2026-10-26 full run recorded above.
 
 2026-10-23: integrated the upstream 0.20.0 UI containers and shared controls. The current
 CAM flow is four 2D stages, with stock-shortage regions and contextual validation,
